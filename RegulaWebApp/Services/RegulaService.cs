@@ -71,6 +71,57 @@ public class RegulaService : IRegulaService
         });
     }
 
+    public async Task<IActionResult> DetectIcao(HttpRequest request)
+    {
+        var imageBase64 = await ReadImageBase64Async(request);
+        if (string.IsNullOrWhiteSpace(imageBase64))
+        {
+            return new BadRequestObjectResult(new { error = "No image provided. Send multipart/form-data with 'image' or JSON with 'imageBase64'." });
+        }
+
+        var options = _optionsAccessor.Value;
+        var client = _httpClientFactory.CreateClient("Regula");
+
+        var payload = new
+        {
+            tag = "icao-detect",
+            processParam = new
+            {
+                onlyCentralFace = true,
+                scenario = "QualityICAO",
+                outputImageParams = new
+                {
+                    crop = new
+                    {
+                        type = 0,
+                        size = new[] { 480, 640 }
+                    }
+                }
+            },
+            image = imageBase64
+        };
+
+        using var response = await client.PostAsJsonAsync(options.DetectEndpoint, payload);
+        var content = await response.Content.ReadAsStringAsync();
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return new ObjectResult(new { error = "Regula ICAO detect request failed.", details = content })
+            {
+                StatusCode = (int)response.StatusCode
+            };
+        }
+
+        var summary = ExtractIcaoSummary(content);
+        return new OkObjectResult(new
+        {
+            summary.CompliancePercent,
+            summary.TotalCompliantCount,
+            summary.TotalCount,
+            summary.Sections
+        });
+    }
+
     public async Task<IActionResult> LivenessDetection(LivenessRequest body)
     {
         body ??= new LivenessRequest();
@@ -209,7 +260,7 @@ public class RegulaService : IRegulaService
         if (request.HasFormContentType)
         {
             var form = await request.ReadFormAsync();
-            var file = form.Files.FirstOrDefault();
+            var file = form.Files.GetFile("image") ?? form.Files.FirstOrDefault();
             if (file is null)
             {
                 return null;
@@ -305,6 +356,251 @@ public class RegulaService : IRegulaService
         {
             return new FaceSummary(new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase));
         }
+    }
+
+    private record IcaoSection(int GroupId, string Name, int CompliantCount, int TotalCount);
+    private record IcaoSummary(double? CompliancePercent, int TotalCompliantCount, int TotalCount, List<IcaoSection> Sections);
+
+    private static IcaoSummary ExtractIcaoSummary(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            var boolKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "isCompliant",
+                "compliant",
+                "icaoCompliant",
+                "isIcaoCompliant",
+                "passed",
+                "pass",
+                "isPassed"
+            };
+
+            var statusKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "status",
+                "result",
+                "icaoStatus",
+                "qualityStatus"
+            };
+
+            var isCompliant = FindFirstBool(root, boolKeys);
+            var sections = ExtractIcaoSections(root);
+            var totals = CalculateComplianceTotals(sections);
+
+            return new IcaoSummary(totals.CompliancePercent, totals.TotalCompliantCount, totals.TotalCount, sections);
+        }
+        catch
+        {
+            return new IcaoSummary(null, 0, 0, new List<IcaoSection>());
+        }
+    }
+
+    private static List<IcaoSection> ExtractIcaoSections(JsonElement root)
+    {
+        var sections = new List<IcaoSection>();
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            return sections;
+        }
+
+        if (!root.TryGetProperty("results", out var results) || results.ValueKind != JsonValueKind.Object)
+        {
+            return sections;
+        }
+
+        if (!results.TryGetProperty("detections", out var detections) || detections.ValueKind != JsonValueKind.Array)
+        {
+            return sections;
+        }
+
+        foreach (var detection in detections.EnumerateArray())
+        {
+            if (!detection.TryGetProperty("quality", out var quality) || quality.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            if (!quality.TryGetProperty("detailsGroups", out var detailsGroups) || detailsGroups.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            foreach (var group in detailsGroups.EnumerateArray())
+            {
+                var groupId = ReadInt(group, "groupId");
+                var name = ReadString(group, "name");
+                var compliantCount = ReadInt(group, "compliantCount");
+                var totalCount = ReadInt(group, "totalCount");
+
+                if (!string.IsNullOrWhiteSpace(name) && groupId.HasValue && compliantCount.HasValue && totalCount.HasValue)
+                {
+                    sections.Add(new IcaoSection(groupId.Value, name, compliantCount.Value, totalCount.Value));
+                }
+            }
+        }
+
+        return sections;
+    }
+
+    private static (double? CompliancePercent, int TotalCompliantCount, int TotalCount) CalculateComplianceTotals(
+        List<IcaoSection> sections)
+    {
+        if (sections.Count == 0)
+        {
+            return (null, 0, 0);
+        }
+
+        var totalCompliant = 0;
+        var total = 0;
+        foreach (var section in sections)
+        {
+            totalCompliant += section.CompliantCount;
+            total += section.TotalCount;
+        }
+
+        if (total <= 0)
+        {
+            return (null, totalCompliant, total);
+        }
+
+        var percent = Math.Round(totalCompliant * 100.0 / total, 2);
+        return (percent, totalCompliant, total);
+    }
+
+    private static bool? FindFirstBool(JsonElement element, HashSet<string> propertyNames)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in element.EnumerateObject())
+            {
+                if (propertyNames.Contains(prop.Name))
+                {
+                    if (prop.Value.ValueKind == JsonValueKind.True || prop.Value.ValueKind == JsonValueKind.False)
+                    {
+                        return prop.Value.GetBoolean();
+                    }
+                    if (prop.Value.ValueKind == JsonValueKind.Number && prop.Value.TryGetInt32(out var num))
+                    {
+                        return num != 0;
+                    }
+                    if (prop.Value.ValueKind == JsonValueKind.String)
+                    {
+                        var value = ParseComplianceFromStatus(prop.Value.GetString());
+                        if (value.HasValue)
+                        {
+                            return value.Value;
+                        }
+                    }
+                }
+
+                var nested = FindFirstBool(prop.Value, propertyNames);
+                if (nested.HasValue)
+                {
+                    return nested;
+                }
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                var nested = FindFirstBool(item, propertyNames);
+                if (nested.HasValue)
+                {
+                    return nested;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static string? FindFirstString(JsonElement element, HashSet<string> propertyNames)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in element.EnumerateObject())
+            {
+                if (propertyNames.Contains(prop.Name) && prop.Value.ValueKind == JsonValueKind.String)
+                {
+                    return prop.Value.GetString();
+                }
+
+                var nested = FindFirstString(prop.Value, propertyNames);
+                if (!string.IsNullOrWhiteSpace(nested))
+                {
+                    return nested;
+                }
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                var nested = FindFirstString(item, propertyNames);
+                if (!string.IsNullOrWhiteSpace(nested))
+                {
+                    return nested;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static bool? ParseComplianceFromStatus(string? status)
+    {
+        if (string.IsNullOrWhiteSpace(status))
+        {
+            return null;
+        }
+
+        var value = status.Trim().ToLowerInvariant();
+        if (value.Contains("pass") || value.Contains("ok") || value.Contains("compliant") || value.Contains("success"))
+        {
+            if (value.Contains("not compliant") || value.Contains("non-compliant") || value.Contains("fail"))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        if (value.Contains("fail") || value.Contains("reject") || value.Contains("non-compliant") || value.Contains("not compliant"))
+        {
+            return false;
+        }
+
+        return null;
+    }
+
+    private static int? ReadInt(JsonElement element, string name)
+    {
+        if (element.ValueKind == JsonValueKind.Object &&
+            element.TryGetProperty(name, out var value) &&
+            value.ValueKind == JsonValueKind.Number &&
+            value.TryGetInt32(out var number))
+        {
+            return number;
+        }
+
+        return null;
+    }
+
+    private static string? ReadString(JsonElement element, string name)
+    {
+        if (element.ValueKind == JsonValueKind.Object &&
+            element.TryGetProperty(name, out var value) &&
+            value.ValueKind == JsonValueKind.String)
+        {
+            return value.GetString();
+        }
+
+        return null;
     }
 
     private static object? ToPlainObject(JsonElement element)

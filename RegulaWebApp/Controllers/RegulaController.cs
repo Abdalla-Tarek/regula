@@ -15,6 +15,13 @@ public class RegulaController : ControllerBase
         return await regulaService.DetectFace(Request);
     }
 
+    [HttpPost("icao-detect")]
+    public async Task<IActionResult> DetectIcao(
+        IRegulaService regulaService)
+    {
+        return await regulaService.DetectIcao(Request);
+    }
+
     [HttpPost("liveness-detection")]
     public async Task<IActionResult> LivenessDetection(
         [FromBody] LivenessRequest body,

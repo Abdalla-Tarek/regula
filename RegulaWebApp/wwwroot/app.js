@@ -1,5 +1,6 @@
 const uploadInput = document.getElementById("uploadInput");
 const uploadBtn = document.getElementById("uploadBtn");
+const icaoDetectBtn = document.getElementById("icaoDetectBtn");
 const startWebcamBtn = document.getElementById("startWebcamBtn");
 const captureDetectBtn = document.getElementById("captureDetectBtn");
 const startLivenessBtn = document.getElementById("startLivenessBtn");
@@ -43,6 +44,25 @@ uploadBtn.addEventListener("click", async () => {
   formData.append("image", file);
 
   const response = await fetch("/api/detect-face", {
+    method: "POST",
+    body: formData,
+  });
+
+  const data = await response.json();
+  setResult(data);
+});
+
+icaoDetectBtn.addEventListener("click", async () => {
+  const file = uploadInput.files[0];
+  if (!file) {
+    setResult({ error: "Select an image first." });
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("image", file);
+
+  const response = await fetch("/api/icao-detect", {
     method: "POST",
     body: formData,
   });
