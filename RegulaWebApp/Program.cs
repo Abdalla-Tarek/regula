@@ -1,4 +1,5 @@
 using RegulaWebApp.Models;
+using RegulaWebApp.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -8,6 +9,8 @@ builder.Services.AddControllers();
 
 builder.Services.Configure<RegulaOptions>(builder.Configuration.GetSection("Regula"));
 builder.Services.Configure<DocROptions>(builder.Configuration.GetSection("DocR"));
+builder.Services.AddScoped<IRegulaService, RegulaService>();
+builder.Services.AddScoped<IDocumentProcessingService, DocumentProcessingService>();
 
 builder.Services.AddHttpClient("Regula", (sp, client) =>
 {
