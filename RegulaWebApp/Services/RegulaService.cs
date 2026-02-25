@@ -173,6 +173,37 @@ public class RegulaService : IRegulaService
         });
     }
 
+    public async Task<(double? similarity, int? statusCode, string? error, string? details)> MatchFaces(string image1, string image2)
+    {
+        if (string.IsNullOrWhiteSpace(image1) || string.IsNullOrWhiteSpace(image2))
+        {
+            return (null, 400, "Provide two images for face match.", null);
+        }
+
+        var options = _optionsAccessor.Value;
+        var client = _httpClientFactory.CreateClient("Regula");
+
+        var payload = new
+        {
+            tag = "face-match",
+            images = new[]
+            {
+                new { index = 0, type = 1, data = image1 },
+                new { index = 1, type = 1, data = image2 }
+            }
+        };
+
+        using var response = await client.PostAsJsonAsync(options.MatchEndpoint, payload);
+        var content = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode)
+        {
+            return (null, (int)response.StatusCode, "Regula match request failed.", content);
+        }
+
+        var summary = ExtractMatchSummary(content);
+        return (summary.Similarity, (int)response.StatusCode, null, null);
+    }
+
     private static async Task<string?> ReadImageBase64Async(HttpRequest request)
     {
         if (request.HasFormContentType)

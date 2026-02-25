@@ -12,13 +12,16 @@ public class DocumentProcessingService : IDocumentProcessingService
 {
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IOptions<DocROptions> _optionsAccessor;
+    private readonly IRegulaService _regulaService;
 
     public DocumentProcessingService(
         IHttpClientFactory httpClientFactory,
-        IOptions<DocROptions> optionsAccessor)
+        IOptions<DocROptions> optionsAccessor,
+        IRegulaService regulaService)
     {
         _httpClientFactory = httpClientFactory;
         _optionsAccessor = optionsAccessor;
+        _regulaService = regulaService;
     }
 
     public async Task<IActionResult> ProcessDocument(HttpRequest request)
@@ -58,15 +61,8 @@ public class DocumentProcessingService : IDocumentProcessingService
             return new BadRequestObjectResult(new { error = "Provide a live portrait. Send form field 'livePortrait' with base64 or JSON 'livePortraitBase64'." });
         }
 
+        var payload = BuildProcessPayload(docRequest, forceAuth: false);
         var options = _optionsAccessor.Value;
-        var faceApiConfig = new DocRFaceApiConfig(options.FaceApiUrl, options.FaceApiMode, options.FaceApiThreshold);
-        var payload = BuildProcessPayload(
-            docRequest,
-            forceAuth: false,
-            includeLivePortrait: true,
-            useFaceApi: true,
-            faceApiConfig: faceApiConfig,
-            oneShotIdentification: true);
         var client = _httpClientFactory.CreateClient("DocR");
 
         using var response = await client.PostAsJsonAsync(options.ProcessEndpoint, payload);
@@ -80,7 +76,29 @@ public class DocumentProcessingService : IDocumentProcessingService
             };
         }
 
-        var similarityPercent = ExtractSimilarityPercent(content);
+        var documentPortrait = ExtractDocumentPortraitBase64(content);
+        if (string.IsNullOrWhiteSpace(documentPortrait))
+        {
+            return new ObjectResult(new { error = "Unable to extract document portrait from DocR response." })
+            {
+                StatusCode = StatusCodes.Status422UnprocessableEntity
+            };
+        }
+
+        var livePortrait = CleanBase64(docRequest.LivePortraitBase64 ?? string.Empty);
+        var matchResult = await _regulaService.MatchFaces(
+            CleanBase64(documentPortrait),
+            livePortrait);
+
+        if (!string.IsNullOrWhiteSpace(matchResult.error))
+        {
+            return new ObjectResult(new { error = matchResult.error, details = matchResult.details })
+            {
+                StatusCode = matchResult.statusCode ?? StatusCodes.Status502BadGateway
+            };
+        }
+
+        var similarityPercent = NormalizeSimilarityPercent(matchResult.similarity);
         return new OkObjectResult(new { similarityPercent });
     }
 
@@ -645,5 +663,140 @@ public class DocumentProcessingService : IDocumentProcessingService
             ".jpeg" => "jpg",
             _ => null
         };
+    }
+
+    private static string? ExtractDocumentPortraitBase64(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var preferredKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "portrait",
+                "portraitimage",
+                "portraitimagedata",
+                "portraitimagebase64",
+                "faceimage",
+                "face",
+                "image",
+                "imagedata",
+                "imagebase64"
+            };
+
+            var byKey = FindFirstBase64ByKeys(root, preferredKeys);
+            if (!string.IsNullOrWhiteSpace(byKey))
+            {
+                return byKey;
+            }
+
+            return FindFirstBase64String(root);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? FindFirstBase64ByKeys(JsonElement element, HashSet<string> keys)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in element.EnumerateObject())
+            {
+                if (keys.Contains(prop.Name) && prop.Value.ValueKind == JsonValueKind.String)
+                {
+                    var value = prop.Value.GetString();
+                    if (IsProbablyBase64(value))
+                    {
+                        return value;
+                    }
+                }
+
+                var nested = FindFirstBase64ByKeys(prop.Value, keys);
+                if (!string.IsNullOrWhiteSpace(nested))
+                {
+                    return nested;
+                }
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                var nested = FindFirstBase64ByKeys(item, keys);
+                if (!string.IsNullOrWhiteSpace(nested))
+                {
+                    return nested;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static string? FindFirstBase64String(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in element.EnumerateObject())
+            {
+                if (prop.Value.ValueKind == JsonValueKind.String)
+                {
+                    var value = prop.Value.GetString();
+                    if (IsProbablyBase64(value))
+                    {
+                        return value;
+                    }
+                }
+
+                var nested = FindFirstBase64String(prop.Value);
+                if (!string.IsNullOrWhiteSpace(nested))
+                {
+                    return nested;
+                }
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                var nested = FindFirstBase64String(item);
+                if (!string.IsNullOrWhiteSpace(nested))
+                {
+                    return nested;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsProbablyBase64(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var trimmed = value.Trim();
+        if (trimmed.Length < 200 || trimmed.Length % 4 != 0)
+        {
+            return false;
+        }
+
+        foreach (var ch in trimmed)
+        {
+            var isValid = (ch >= 'A' && ch <= 'Z') ||
+                          (ch >= 'a' && ch <= 'z') ||
+                          (ch >= '0' && ch <= '9') ||
+                          ch is '+' or '/' or '=';
+            if (!isValid)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }
