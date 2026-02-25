@@ -80,6 +80,16 @@
         <div class="row">
           <input id="verifyDocInput" type="file" accept="image/*,.pdf" multiple />
           <button id="verifyIdentityBtn" class="primary">Verify With Live Face</button>
+          <div class="match-result" id="verifyResult">
+            <div class="match-card">
+              <img id="verifyPreviewDoc" alt="Document portrait" />
+              <div class="match-score" id="verifyScoreDoc">—</div>
+            </div>
+            <div class="match-card">
+              <img id="verifyPreviewLive" alt="Live portrait" />
+              <div class="match-score" id="verifyScoreLive">—</div>
+            </div>
+          </div>
         </div>
         <div class="instructions">
           <span class="label">Tip:</span>

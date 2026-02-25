@@ -99,7 +99,11 @@ public class DocumentProcessingService : IDocumentProcessingService
         }
 
         var similarityPercent = NormalizeSimilarityPercent(matchResult.similarity);
-        return new OkObjectResult(new { similarityPercent });
+        return new OkObjectResult(new
+        {
+            similarityPercent,
+            documentPortraitBase64 = CleanBase64(documentPortrait)
+        });
     }
 
     private DocRProcessRequest BuildProcessPayload(

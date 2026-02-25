@@ -21,6 +21,10 @@ const docProcessBtn = document.getElementById("docProcessBtn");
 const docFraudBtn = document.getElementById("docFraudBtn");
 const verifyDocInput = document.getElementById("verifyDocInput");
 const verifyIdentityBtn = document.getElementById("verifyIdentityBtn");
+const verifyPreviewDoc = document.getElementById("verifyPreviewDoc");
+const verifyPreviewLive = document.getElementById("verifyPreviewLive");
+const verifyScoreDoc = document.getElementById("verifyScoreDoc");
+const verifyScoreLive = document.getElementById("verifyScoreLive");
 
 let stream = null;
 
@@ -208,6 +212,12 @@ verifyIdentityBtn.addEventListener("click", async () => {
     return;
   }
 
+  setVerifyPreview(
+    "",
+    base64ToDataUrl(livePortrait),
+    null
+  );
+
   const formData = new FormData();
   files.forEach((file) => formData.append("images", file));
   formData.append("livePortrait", livePortrait);
@@ -219,6 +229,13 @@ verifyIdentityBtn.addEventListener("click", async () => {
 
   const data = await response.json();
   setResult(data);
+  const similarity = data?.similarityPercent ?? data?.similarity ?? data?.Similarity ?? null;
+  const docPortraitBase64 = data?.documentPortraitBase64 ?? data?.documentPortrait ?? null;
+  setVerifyPreview(
+    docPortraitBase64 ? base64ToDataUrl(docPortraitBase64) : "",
+    base64ToDataUrl(livePortrait),
+    similarity
+  );
 });
 
 function captureFrame() {
@@ -286,6 +303,30 @@ function showMatchScore(data) {
   const label = `${percent.toFixed(1)}% match`;
   matchScore1.textContent = label;
   matchScore2.textContent = label;
+}
+
+function setVerifyPreview(docSrc, liveSrc, similarity) {
+  if (verifyPreviewDoc && docSrc) {
+    verifyPreviewDoc.src = docSrc;
+  }
+  if (verifyPreviewLive && liveSrc) {
+    verifyPreviewLive.src = liveSrc;
+  }
+
+  if (!verifyScoreDoc || !verifyScoreLive) {
+    return;
+  }
+
+  if (similarity == null) {
+    verifyScoreDoc.textContent = "—";
+    verifyScoreLive.textContent = "—";
+    return;
+  }
+
+  const percent = similarity > 1 ? similarity : similarity * 100;
+  const label = `${percent.toFixed(1)}% match`;
+  verifyScoreDoc.textContent = label;
+  verifyScoreLive.textContent = label;
 }
 
 async function submitDocument(url) {
