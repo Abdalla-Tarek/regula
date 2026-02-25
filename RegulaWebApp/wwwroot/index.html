@@ -20,6 +20,20 @@
           <button id="uploadBtn" class="primary">Detect Face</button>
           <button id="icaoDetectBtn">Detect ICAO</button>
         </div>
+        <div class="row">
+          <img id="icaoPreview" class="icao-preview" alt="Selected image preview" />
+          <div class="icao-summary" id="icaoSummary" hidden>
+            <div class="icao-score">
+              <span class="label">Compliance</span>
+              <span class="value" id="icaoPercent">â€”</span>
+            </div>
+            <div class="icao-totals">
+              <span class="label">Totals</span>
+              <span class="value" id="icaoTotals">â€”</span>
+            </div>
+          </div>
+        </div>
+        <div class="icao-sections" id="icaoSections" hidden></div>
       </section>
 
       <section class="panel">

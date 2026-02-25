@@ -1,6 +1,11 @@
 const uploadInput = document.getElementById("uploadInput");
 const uploadBtn = document.getElementById("uploadBtn");
 const icaoDetectBtn = document.getElementById("icaoDetectBtn");
+const icaoPreview = document.getElementById("icaoPreview");
+const icaoSummary = document.getElementById("icaoSummary");
+const icaoPercent = document.getElementById("icaoPercent");
+const icaoTotals = document.getElementById("icaoTotals");
+const icaoSections = document.getElementById("icaoSections");
 const startWebcamBtn = document.getElementById("startWebcamBtn");
 const captureDetectBtn = document.getElementById("captureDetectBtn");
 const startLivenessBtn = document.getElementById("startLivenessBtn");
@@ -59,6 +64,9 @@ icaoDetectBtn.addEventListener("click", async () => {
     return;
   }
 
+  const previewUrl = await fileToDataUrl(file);
+  setIcaoPreview(previewUrl);
+
   const formData = new FormData();
   formData.append("image", file);
 
@@ -69,6 +77,7 @@ icaoDetectBtn.addEventListener("click", async () => {
 
   const data = await response.json();
   setResult(data);
+  renderIcaoSummary(data);
 });
 
 startWebcamBtn.addEventListener("click", async () => {
@@ -309,6 +318,79 @@ function setMatchPreview(src1, src2) {
   if (src2) {
     matchPreview2.src = src2;
   }
+}
+
+function setIcaoPreview(src) {
+  if (!icaoPreview) {
+    return;
+  }
+
+  icaoPreview.src = src || "";
+}
+
+function renderIcaoSummary(data) {
+  if (!icaoSummary || !icaoSections) {
+    return;
+  }
+
+  const sections = Array.isArray(data?.sections) ? data.sections : [];
+  const total = data?.totalCount ?? null;
+  const totalCompliant = data?.totalCompliantCount ?? null;
+  const percent = data?.compliancePercent ?? null;
+
+  if (!sections.length) {
+    icaoSummary.hidden = true;
+    icaoSections.hidden = true;
+    icaoSections.innerHTML = "";
+    if (icaoPercent) icaoPercent.textContent = "â€”";
+    if (icaoTotals) icaoTotals.textContent = "â€”";
+    return;
+  }
+
+  icaoSummary.hidden = false;
+  icaoSections.hidden = false;
+
+  if (icaoPercent) {
+    icaoPercent.textContent = percent == null ? "â€”" : `${Number(percent).toFixed(2)}%`;
+  }
+  if (icaoTotals) {
+    if (total != null && totalCompliant != null) {
+      icaoTotals.textContent = `${totalCompliant}/${total}`;
+    } else {
+      icaoTotals.textContent = "â€”";
+    }
+  }
+
+  icaoSections.innerHTML = "";
+  sections.forEach((section) => {
+    const name = section?.name ?? "Section";
+    const compliant = section?.compliantCount ?? 0;
+    const sectionTotal = section?.totalCount ?? 0;
+
+    const row = document.createElement("div");
+    row.className = "icao-section";
+
+    const nameEl = document.createElement("span");
+    nameEl.className = "name";
+    nameEl.textContent = formatIcaoName(name);
+
+    const countEl = document.createElement("span");
+    countEl.className = "count";
+    countEl.textContent = `${compliant}/${sectionTotal}`;
+
+    row.appendChild(nameEl);
+    row.appendChild(countEl);
+    icaoSections.appendChild(row);
+  });
+}
+
+function formatIcaoName(value) {
+  if (!value) {
+    return "Section";
+  }
+
+  const withSpaces = value.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/_/g, " ");
+  return withSpaces.replace(/\s+/g, " ").trim();
 }
 
 function showMatchScore(data) {
