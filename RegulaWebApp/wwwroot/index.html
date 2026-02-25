@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Regula Face + Liveness Demo</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="hero">
+        <h1>Regula Face Detection + Liveness</h1>
+        <p>Upload a photo or use the webcam to capture liveness directions.</p>
+      </header>
+
+      <section class="panel">
+        <h2>Upload Image</h2>
+        <div class="row">
+          <input id="uploadInput" type="file" accept="image/*" />
+          <button id="uploadBtn" class="primary">Detect Face</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Webcam</h2>
+        <div class="row">
+          <button id="startWebcamBtn" class="primary">Start Webcam</button>
+          <button id="captureDetectBtn">Capture Frame & Detect</button>
+          <button id="startLivenessBtn">Start Liveness</button>
+        </div>
+        <div class="row">
+          <input id="transactionIdInput" type="text" placeholder="Transaction ID (optional)" />
+        </div>
+        <div class="camera">
+          <video id="webcam" autoplay playsinline muted></video>
+          <canvas id="snapshot" width="640" height="480" hidden></canvas>
+        </div>
+        <div class="instructions">
+          <span class="label">Instructions:</span>
+          <span id="instructionText">Idle</span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Result</h2>
+        <pre id="resultJson">{}</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Face Match</h2>
+        <div class="row match-row">
+          <input id="matchInput1" type="file" accept="image/*" />
+          <input id="matchInput2" type="file" accept="image/*" />
+          <button id="matchBtn" class="primary">Compare Faces</button>
+          <div class="match-result" id="matchResult">
+            <div class="match-card">
+              <img id="matchPreview1" alt="Match image 1" />
+              <div class="match-score" id="matchScore1">—</div>
+            </div>
+            <div class="match-card">
+              <img id="matchPreview2" alt="Match image 2" />
+              <div class="match-score" id="matchScore2">—</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Document Processing</h2>
+        <div class="row">
+          <input id="docInput" type="file" accept="image/*,.pdf" multiple />
+          <input id="docScenario" type="text" placeholder="Scenario (optional)" />
+          <button id="docProcessBtn" class="primary">Process Document</button>
+          <!--<button id="docFraudBtn">Detect Fraud</button>-->
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Verify Identity</h2>
+        <div class="row">
+          <input id="verifyDocInput" type="file" accept="image/*,.pdf" multiple />
+          <button id="verifyIdentityBtn" class="primary">Verify With Live Face</button>
+        </div>
+        <div class="instructions">
+          <span class="label">Tip:</span>
+          <span>Start the webcam above to capture the live face.</span>
+        </div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

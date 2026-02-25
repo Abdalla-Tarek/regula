@@ -1,0 +1,36 @@
+@RegulaWebApp_HostAddress = http://localhost:5000
+
+POST {{RegulaWebApp_HostAddress}}/api/detect-face
+Content-Type: application/json
+
+{
+  "imageBase64": "BASE64_IMAGE"
+}
+
+###
+
+POST {{RegulaWebApp_HostAddress}}/api/liveness-detection
+Content-Type: application/json
+
+{
+  "frames": ["BASE64_FRAME_1", "BASE64_FRAME_2", "BASE64_FRAME_3", "BASE64_FRAME_4"]
+}
+
+###
+
+POST {{RegulaWebApp_HostAddress}}/api/liveness-detection
+Content-Type: application/json
+
+{
+  "transactionId": "TRANSACTION_ID"
+}
+
+###
+
+POST {{RegulaWebApp_HostAddress}}/api/face-match
+Content-Type: application/json
+
+{
+  "imageBase64_1": "BASE64_IMAGE_1",
+  "imageBase64_2": "BASE64_IMAGE_2"
+}
