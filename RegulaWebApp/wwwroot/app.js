@@ -31,12 +31,23 @@ const verifyPreviewDoc = document.getElementById("verifyPreviewDoc");
 const verifyPreviewLive = document.getElementById("verifyPreviewLive");
 const verifyScoreDoc = document.getElementById("verifyScoreDoc");
 const verifyScoreLive = document.getElementById("verifyScoreLive");
+const stepperPopupBtn = document.getElementById("stepperPopupBtn");
 
 let stream = null;
 
 const setResult = (data) => {
   resultJson.textContent = JSON.stringify(data, null, 2);
 };
+
+if (stepperPopupBtn) {
+  stepperPopupBtn.addEventListener("click", () => {
+    window.open(
+      "/stepper.html",
+      "stepperPoc",
+      "width=960,height=720,menubar=no,location=no,status=no,toolbar=no"
+    );
+  });
+}
 
 uploadBtn.addEventListener("click", async () => {
   const file = uploadInput.files[0];

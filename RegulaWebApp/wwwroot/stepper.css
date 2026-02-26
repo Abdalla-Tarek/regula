@@ -1,0 +1,143 @@
+:root {
+  --bg: #f5f2ed;
+  --panel: #ffffff;
+  --text: #1f2933;
+  --muted: #6b7280;
+  --accent: #c0392b;
+  --border: #e5e7eb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  color: var(--text);
+  background: linear-gradient(135deg, #f5f2ed 0%, #efe7df 100%);
+}
+
+.page {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 32px 20px 64px;
+}
+
+.page-header h1 {
+  margin-bottom: 8px;
+}
+
+.page-header p {
+  margin-top: 0;
+  color: var(--muted);
+}
+
+.stepper {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 10px 30px rgba(17, 24, 39, 0.08);
+}
+
+.stepper-nav {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.stepper-tab {
+  border: 1px solid var(--border);
+  background: #fafafa;
+  padding: 12px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--muted);
+  transition: all 0.15s ease;
+}
+
+.stepper-tab.is-active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.stepper-tab:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.stepper-panel {
+  display: none;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  background: #fffdfa;
+}
+
+.stepper-panel.is-active {
+  display: block;
+}
+
+.stepper-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.stepper-actions button {
+  border: none;
+  background: var(--accent);
+  color: white;
+  padding: 10px 18px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.stepper-actions button[disabled] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.video-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  background: #111827;
+  color: white;
+}
+
+.video-card video {
+  width: 100%;
+  max-height: 360px;
+  object-fit: contain;
+  border-radius: 8px;
+  background: black;
+}
+
+.video-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.video-controls button {
+  border: 1px solid #374151;
+  background: #111827;
+  color: white;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+#videoStatus {
+  font-size: 0.9rem;
+  color: #d1d5db;
+}

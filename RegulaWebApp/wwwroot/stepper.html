@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stepper POC</title>
+  <link rel="stylesheet" href="/stepper.css" />
+</head>
+<body>
+  <main class="page">
+    <header class="page-header">
+      <h1>Document Capture Stepper (POC)</h1>
+      <p>Step 2 requires watching the full video before continuing.</p>
+    </header>
+
+    <section class="stepper" aria-label="Process steps">
+      <div class="stepper-nav">
+        <button class="stepper-tab is-active" data-step="1" type="button">Step 1</button>
+        <button class="stepper-tab" data-step="2" type="button">Step 2</button>
+        <button class="stepper-tab" data-step="3" type="button" disabled>Step 3</button>
+      </div>
+
+      <div class="stepper-panel is-active" data-step="1">
+        <h2>Step 1</h2>
+        <p>Placeholder content. Click Next to proceed to the video step.</p>
+        <div class="stepper-actions">
+          <button type="button" data-action="next">Next</button>
+        </div>
+      </div>
+
+      <div class="stepper-panel" data-step="2">
+        <h2>Step 2</h2>
+        <p>Please watch the full video. You cannot skip ahead.</p>
+        <div class="video-card">
+          <video id="trainingVideo" preload="metadata" playsinline>
+            <source src="/test%20video.mp4" type="video/mp4" />
+            Your browser does not support the video tag.
+          </video>
+          <div class="video-controls">
+            <button type="button" id="playPauseBtn">Play</button>
+            <span id="videoStatus">Remaining: --:--</span>
+          </div>
+        </div>
+        <div class="stepper-actions">
+          <button type="button" data-action="prev">Back</button>
+          <button type="button" data-action="next" id="step2Next" disabled>Next</button>
+        </div>
+      </div>
+
+      <div class="stepper-panel" data-step="3">
+        <h2>Step 3</h2>
+        <p>You completed the video step. This is the final step.</p>
+        <div class="stepper-actions">
+          <button type="button" data-action="prev">Back</button>
+          <button type="button">Finish</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/stepper.js"></script>
+</body>
+</html>
