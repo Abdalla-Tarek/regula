@@ -245,20 +245,23 @@ public class DocumentProcessingService : IDocumentProcessingService
                 ? (validity.invalid.Count == 0 ? "valid" : "invalid")
                 : FindFirstString(root, new[] { "status", "overallStatus", "result", "ResultStatus" });
 
-            return new
+            var documentPosition = ExtractDocumentPosition(root);
+
+            return new DocRSummary
             {
-                transactionId,
-                overallStatus,
-                documentType,
-                documentNumber,
-                fullName,
-                dateOfBirth,
-                expiryDate,
-                validity = new
+                TransactionId = transactionId,
+                OverallStatus = overallStatus,
+                DocumentType = documentType,
+                DocumentNumber = documentNumber,
+                FullName = fullName,
+                DateOfBirth = dateOfBirth,
+                ExpiryDate = expiryDate,
+                Validity = new DocRValiditySummary
                 {
-                    valid = validity.valid,
-                    invalid = validity.invalid
-                }
+                    Valid = validity.valid,
+                    Invalid = validity.invalid
+                },
+                DocumentPosition = documentPosition
             };
         }
         catch
@@ -392,6 +395,514 @@ public class DocumentProcessingService : IDocumentProcessingService
             if (fields.TryGetValue(name, out var value) && !string.IsNullOrWhiteSpace(value))
             {
                 return value;
+            }
+        }
+
+        return null;
+    }
+
+    private static DocumentPositionInfo? ExtractDocumentPosition(JsonElement root)
+    {
+        var node = FindFirstObjectByName(root, "DocumentPosition");
+        if (!node.HasValue)
+        {
+            node = FindFirstObjectByNameIgnoreCase(root, "DocumentPosition");
+        }
+
+        if (!node.HasValue)
+        {
+            return null;
+        }
+
+        var raw = ParseDocumentPositionRaw(node.Value);
+        var region = BuildRegionFromCorners(raw?.LeftTop, raw?.RightTop, raw?.RightBottom, raw?.LeftBottom);
+        var info = new DocumentPositionInfo
+        {
+            Raw = raw,
+            Region = region
+        };
+
+        info = info with
+        {
+            Interpretation = BuildInterpretation(info),
+            Verdict = BuildVerdict(info),
+            UserMessage = BuildUserMessage(info)
+        };
+
+        return info;
+    }
+
+    private static DocumentPositionRaw ParseDocumentPositionRaw(JsonElement element)
+    {
+        return new DocumentPositionRaw
+        {
+            Angle = ReadDouble(element, "Angle"),
+            Center = ReadPoint(element, "Center"),
+            Dpi = ReadInt(element, "Dpi"),
+            Height = ReadInt(element, "Height"),
+            Width = ReadInt(element, "Width"),
+            Inverse = ReadInt(element, "Inverse"),
+            ObjArea = ReadDouble(element, "ObjArea"),
+            ObjIntAngleDev = ReadDouble(element, "ObjIntAngleDev"),
+            PerspectiveTr = ReadInt(element, "PerspectiveTr"),
+            ResultStatus = ReadInt(element, "ResultStatus"),
+            DocFormat = ReadInt(element, "docFormat"),
+            LeftTop = ReadPoint(element, "LeftTop"),
+            RightTop = ReadPoint(element, "RightTop"),
+            RightBottom = ReadPoint(element, "RightBottom"),
+            LeftBottom = ReadPoint(element, "LeftBottom")
+        };
+    }
+
+    private static DocumentRegion? BuildRegionFromCorners(
+        DocumentPoint? leftTop,
+        DocumentPoint? rightTop,
+        DocumentPoint? rightBottom,
+        DocumentPoint? leftBottom)
+    {
+        if (leftTop is null && rightTop is null && rightBottom is null && leftBottom is null)
+        {
+            return null;
+        }
+
+        var points = new List<DocumentPoint>();
+        if (leftTop is not null)
+        {
+            points.Add(leftTop);
+        }
+
+        if (rightTop is not null)
+        {
+            points.Add(rightTop);
+        }
+
+        if (rightBottom is not null)
+        {
+            points.Add(rightBottom);
+        }
+
+        if (leftBottom is not null)
+        {
+            points.Add(leftBottom);
+        }
+
+        return new DocumentRegion
+        {
+            LeftTop = leftTop,
+            RightTop = rightTop,
+            RightBottom = rightBottom,
+            LeftBottom = leftBottom,
+            Points = points
+        };
+    }
+
+    private static DocumentPositionInterpretation BuildInterpretation(DocumentPositionInfo info)
+    {
+        var raw = info.Raw;
+        return new DocumentPositionInterpretation
+        {
+            ResultStatus = BuildResultStatusInterpretation(raw?.ResultStatus),
+            ObjArea = BuildObjAreaInterpretation(raw?.ObjArea),
+            PerspectiveTr = BuildPerspectiveInterpretation(raw?.PerspectiveTr),
+            Angle = BuildAngleInterpretation(raw?.Angle),
+            Inverse = BuildInverseInterpretation(raw?.Inverse),
+            DocFormat = BuildDocFormatInterpretation(raw?.DocFormat),
+            Center = BuildCenterInterpretation(raw?.Center),
+            WidthHeight = BuildWidthHeightInterpretation(raw?.Width, raw?.Height)
+        };
+    }
+
+    private static DocumentPositionVerdict BuildVerdict(DocumentPositionInfo info)
+    {
+        var raw = info.Raw;
+        var reasons = new List<string>();
+
+        if (!raw?.ResultStatus.HasValue ?? true)
+        {
+            reasons.Add("ResultStatusMissing");
+        }
+        else if (raw.ResultStatus != 1)
+        {
+            reasons.Add("ResultStatusNotOK");
+        }
+
+        if (!raw?.ObjArea.HasValue ?? true)
+        {
+            reasons.Add("ObjAreaMissing");
+        }
+        else if (raw.ObjArea < 50)
+        {
+            reasons.Add("ObjAreaTooSmall");
+        }
+        else if (raw.ObjArea < 70)
+        {
+            reasons.Add("ObjAreaBorderline");
+        }
+
+        if (raw?.PerspectiveTr == 0)
+        {
+            reasons.Add("PerspectiveNotOK");
+        }
+
+        if (raw?.Inverse == 1)
+        {
+            reasons.Add("ImageInverted");
+        }
+
+        if (raw?.Angle.HasValue == true && Math.Abs(raw.Angle.Value) > 10)
+        {
+            reasons.Add("RotationTooLarge");
+        }
+
+        if (reasons.Count == 0 && raw is null)
+        {
+            reasons.Add("InsufficientData");
+        }
+
+        return new DocumentPositionVerdict
+        {
+            IsCorrectFraming = reasons.Count == 0,
+            Reasons = reasons
+        };
+    }
+
+    private static string BuildUserMessage(DocumentPositionInfo info)
+    {
+        var verdict = info.Verdict;
+        if (verdict is null)
+        {
+            return "Unable to evaluate framing; please try again.";
+        }
+
+        if (verdict.IsCorrectFraming)
+        {
+            return "Great framing. Keep the document centered and fully inside the frame.";
+        }
+
+        var reasons = verdict.Reasons;
+        if (reasons.Contains("ObjAreaTooSmall"))
+        {
+            return "Please move the document closer to fill more of the frame.";
+        }
+
+        if (reasons.Contains("ObjAreaBorderline"))
+        {
+            return "Please move the document slightly closer and minimize background.";
+        }
+
+        if (reasons.Contains("PerspectiveNotOK"))
+        {
+            return "Please hold the document flat to the camera.";
+        }
+
+        if (reasons.Contains("RotationTooLarge"))
+        {
+            return "Please rotate the document to be level.";
+        }
+
+        if (reasons.Contains("ImageInverted"))
+        {
+            return "Please flip the document to the correct orientation.";
+        }
+
+        if (reasons.Contains("ResultStatusNotOK"))
+        {
+            return "Please make sure the entire document is visible, well lit, and centered.";
+        }
+
+        return "Unable to evaluate framing; please try again.";
+    }
+
+    private static DocumentPositionInterpretationEntry<int?> BuildResultStatusInterpretation(int? value)
+    {
+        if (!value.HasValue)
+        {
+            return new DocumentPositionInterpretationEntry<int?>
+            {
+                Value = null,
+                Description = "Not provided by server."
+            };
+        }
+
+        var description = value.Value switch
+        {
+            1 => "OK",
+            0 => "Failed",
+            2 => "Borderline / not ideal framing. Not fully OK.",
+            _ => "Unknown result status."
+        };
+
+        return new DocumentPositionInterpretationEntry<int?>
+        {
+            Value = value,
+            Description = description
+        };
+    }
+
+    private static DocumentPositionInterpretationEntry<double?> BuildObjAreaInterpretation(double? value)
+    {
+        if (!value.HasValue)
+        {
+            return new DocumentPositionInterpretationEntry<double?>
+            {
+                Value = null,
+                Description = "Not provided by server."
+            };
+        }
+
+        var description = value.Value switch
+        {
+            >= 70 => $"Document covers {Math.Round(value.Value, 2)}% of the image. Good full-frame coverage.",
+            >= 50 => $"Document covers {Math.Round(value.Value, 2)}% of the image. Borderline coverage; recommended >= 70%.",
+            _ => $"Document covers {Math.Round(value.Value, 2)}% of the image. Too much background; recommended >= 70%."
+        };
+
+        return new DocumentPositionInterpretationEntry<double?>
+        {
+            Value = value,
+            Description = description
+        };
+    }
+
+    private static DocumentPositionInterpretationEntry<int?> BuildPerspectiveInterpretation(int? value)
+    {
+        if (!value.HasValue)
+        {
+            return new DocumentPositionInterpretationEntry<int?>
+            {
+                Value = null,
+                Description = "Not provided by server."
+            };
+        }
+
+        var description = value.Value switch
+        {
+            1 => "Perspective is acceptable (no strong distortion).",
+            0 => "Perspective is not acceptable (strong distortion).",
+            2 => "Perspective check not performed.",
+            _ => "Unknown perspective status."
+        };
+
+        return new DocumentPositionInterpretationEntry<int?>
+        {
+            Value = value,
+            Description = description
+        };
+    }
+
+    private static DocumentPositionInterpretationEntry<double?> BuildAngleInterpretation(double? value)
+    {
+        if (!value.HasValue)
+        {
+            return new DocumentPositionInterpretationEntry<double?>
+            {
+                Value = null,
+                Description = "Not provided by server."
+            };
+        }
+
+        var angle = Math.Abs(value.Value);
+        var description = angle switch
+        {
+            <= 2 => "Small rotation angle (acceptable).",
+            <= 10 => "Noticeable rotation; try to align the document.",
+            _ => "Large rotation angle; please rotate the document."
+        };
+
+        return new DocumentPositionInterpretationEntry<double?>
+        {
+            Value = value,
+            Description = description
+        };
+    }
+
+    private static DocumentPositionInterpretationEntry<int?> BuildInverseInterpretation(int? value)
+    {
+        if (!value.HasValue)
+        {
+            return new DocumentPositionInterpretationEntry<int?>
+            {
+                Value = null,
+                Description = "Not provided by server."
+            };
+        }
+
+        var description = value.Value switch
+        {
+            0 => "Image is not inverted.",
+            1 => "Image appears inverted.",
+            _ => "Unknown inversion status."
+        };
+
+        return new DocumentPositionInterpretationEntry<int?>
+        {
+            Value = value,
+            Description = description
+        };
+    }
+
+    private static DocumentPositionInterpretationEntry<int?> BuildDocFormatInterpretation(int? value)
+    {
+        if (!value.HasValue)
+        {
+            return new DocumentPositionInterpretationEntry<int?>
+            {
+                Value = null,
+                Description = "Not provided by server."
+            };
+        }
+
+        return new DocumentPositionInterpretationEntry<int?>
+        {
+            Value = value,
+            Description = "Detected document format code."
+        };
+    }
+
+    private static DocumentPositionInterpretationEntry<DocumentPoint?> BuildCenterInterpretation(DocumentPoint? value)
+    {
+        return new DocumentPositionInterpretationEntry<DocumentPoint?>
+        {
+            Value = value,
+            Description = value is null
+                ? "Not provided by server."
+                : "Document center point in image coordinates."
+        };
+    }
+
+    private static DocumentPositionInterpretationEntry<DocumentWidthHeight?> BuildWidthHeightInterpretation(int? width, int? height)
+    {
+        if (!width.HasValue && !height.HasValue)
+        {
+            return new DocumentPositionInterpretationEntry<DocumentWidthHeight?>
+            {
+                Value = null,
+                Description = "Not provided by server."
+            };
+        }
+
+        return new DocumentPositionInterpretationEntry<DocumentWidthHeight?>
+        {
+            Value = new DocumentWidthHeight { Width = width, Height = height },
+            Description = "Detected document size in pixels (in the input image coordinate space)."
+        };
+    }
+
+    private static DocumentPoint? ReadPoint(JsonElement element, string propertyName)
+    {
+        if (!TryGetPropertyIgnoreCase(element, propertyName, out var pointElement) ||
+            pointElement.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var x = ReadDouble(pointElement, "x");
+        var y = ReadDouble(pointElement, "y");
+
+        if (!x.HasValue && !y.HasValue)
+        {
+            return null;
+        }
+
+        return new DocumentPoint { X = x, Y = y };
+    }
+
+    private static double? ReadDouble(JsonElement element, string propertyName)
+    {
+        if (!TryGetPropertyIgnoreCase(element, propertyName, out var value))
+        {
+            return null;
+        }
+
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var number))
+        {
+            return number;
+        }
+
+        if (value.ValueKind == JsonValueKind.String && double.TryParse(value.GetString(), out var parsed))
+        {
+            return parsed;
+        }
+
+        return null;
+    }
+
+    private static int? ReadInt(JsonElement element, string propertyName)
+    {
+        if (!TryGetPropertyIgnoreCase(element, propertyName, out var value))
+        {
+            return null;
+        }
+
+        if (value.ValueKind == JsonValueKind.Number)
+        {
+            if (value.TryGetInt32(out var number))
+            {
+                return number;
+            }
+
+            if (value.TryGetDouble(out var doubleValue))
+            {
+                return (int)Math.Round(doubleValue);
+            }
+        }
+
+        if (value.ValueKind == JsonValueKind.String && int.TryParse(value.GetString(), out var parsed))
+        {
+            return parsed;
+        }
+
+        return null;
+    }
+
+    private static bool TryGetPropertyIgnoreCase(JsonElement element, string propertyName, out JsonElement value)
+    {
+        value = default;
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        foreach (var prop in element.EnumerateObject())
+        {
+            if (string.Equals(prop.Name, propertyName, StringComparison.OrdinalIgnoreCase))
+            {
+                value = prop.Value;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static JsonElement? FindFirstObjectByNameIgnoreCase(JsonElement element, string name)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in element.EnumerateObject())
+            {
+                if (string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase) &&
+                    prop.Value.ValueKind == JsonValueKind.Object)
+                {
+                    return prop.Value;
+                }
+
+                var nested = FindFirstObjectByNameIgnoreCase(prop.Value, name);
+                if (nested.HasValue)
+                {
+                    return nested;
+                }
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                var nested = FindFirstObjectByNameIgnoreCase(item, name);
+                if (nested.HasValue)
+                {
+                    return nested;
+                }
             }
         }
 

@@ -14,6 +14,98 @@ public record DocumentProcessRequest
     public string? LivePortraitBase64 { get; init; }
 }
 
+public record DocRSummary
+{
+    public string? TransactionId { get; init; }
+    public string? OverallStatus { get; init; }
+    public string? DocumentType { get; init; }
+    public string? DocumentNumber { get; init; }
+    public string? FullName { get; init; }
+    public string? DateOfBirth { get; init; }
+    public string? ExpiryDate { get; init; }
+    public DocRValiditySummary Validity { get; init; } = new();
+    public DocumentPositionInfo? DocumentPosition { get; init; }
+}
+
+public record DocRValiditySummary
+{
+    public List<string> Valid { get; init; } = new();
+    public List<string> Invalid { get; init; } = new();
+}
+
+public record DocumentPositionInfo
+{
+    public DocumentPositionRaw? Raw { get; init; }
+    public DocumentRegion? Region { get; init; }
+    public DocumentPositionInterpretation? Interpretation { get; init; }
+    public DocumentPositionVerdict? Verdict { get; init; }
+    public string? UserMessage { get; init; }
+}
+
+public record DocumentPositionRaw
+{
+    public double? Angle { get; init; }
+    public DocumentPoint? Center { get; init; }
+    public int? Dpi { get; init; }
+    public int? Height { get; init; }
+    public int? Width { get; init; }
+    public int? Inverse { get; init; }
+    public double? ObjArea { get; init; }
+    public double? ObjIntAngleDev { get; init; }
+    public int? PerspectiveTr { get; init; }
+    public int? ResultStatus { get; init; }
+    public int? DocFormat { get; init; }
+    public DocumentPoint? LeftTop { get; init; }
+    public DocumentPoint? RightTop { get; init; }
+    public DocumentPoint? RightBottom { get; init; }
+    public DocumentPoint? LeftBottom { get; init; }
+}
+
+public record DocumentPoint
+{
+    public double? X { get; init; }
+    public double? Y { get; init; }
+}
+
+public record DocumentRegion
+{
+    public DocumentPoint? LeftTop { get; init; }
+    public DocumentPoint? RightTop { get; init; }
+    public DocumentPoint? RightBottom { get; init; }
+    public DocumentPoint? LeftBottom { get; init; }
+    public List<DocumentPoint> Points { get; init; } = new();
+}
+
+public record DocumentPositionInterpretation
+{
+    public DocumentPositionInterpretationEntry<int?>? ResultStatus { get; init; }
+    public DocumentPositionInterpretationEntry<double?>? ObjArea { get; init; }
+    public DocumentPositionInterpretationEntry<int?>? PerspectiveTr { get; init; }
+    public DocumentPositionInterpretationEntry<double?>? Angle { get; init; }
+    public DocumentPositionInterpretationEntry<int?>? Inverse { get; init; }
+    public DocumentPositionInterpretationEntry<int?>? DocFormat { get; init; }
+    public DocumentPositionInterpretationEntry<DocumentPoint?>? Center { get; init; }
+    public DocumentPositionInterpretationEntry<DocumentWidthHeight?>? WidthHeight { get; init; }
+}
+
+public record DocumentWidthHeight
+{
+    public int? Width { get; init; }
+    public int? Height { get; init; }
+}
+
+public record DocumentPositionInterpretationEntry<T>
+{
+    public T? Value { get; init; }
+    public string Description { get; init; } = "Not provided by server.";
+}
+
+public record DocumentPositionVerdict
+{
+    public bool IsCorrectFraming { get; init; }
+    public List<string> Reasons { get; init; } = new();
+}
+
 public record DocRProcessRequest(
     [property: JsonPropertyName("processParam")] DocRProcessParam ProcessParam,
     [property: JsonPropertyName("List")] List<DocRListItem> List,
