@@ -27,4 +27,18 @@ public class DocumentsController : ControllerBase
     {
         return await documentProcessingService.VerifyIdentity(Request);
     }
+
+    [HttpPost("compare-passports")]
+    public async Task<IActionResult> ComparePassports(
+        IDocumentProcessingService documentProcessingService)
+    {
+        return await documentProcessingService.ComparePassportsAsync(Request);
+    }
+
+    [HttpPost("compare-documents")]
+    public async Task<IActionResult> CompareDocuments(
+        IDocumentProcessingService documentProcessingService)
+    {
+        return await documentProcessingService.ComparePassportsAsync(Request);
+    }
 }

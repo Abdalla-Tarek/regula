@@ -32,8 +32,18 @@ const verifyPreviewLive = document.getElementById("verifyPreviewLive");
 const verifyScoreDoc = document.getElementById("verifyScoreDoc");
 const verifyScoreLive = document.getElementById("verifyScoreLive");
 const stepperPopupBtn = document.getElementById("stepperPopupBtn");
+const passportUploadInput = document.getElementById("passportUploadInput");
+const comparePassportsBtn = document.getElementById("comparePassportsBtn");
+const passportPreview1 = document.getElementById("passportPreview1");
+const passportPreview2 = document.getElementById("passportPreview2");
+const passportSummary = document.getElementById("passportSummary");
+const passportFaceScore = document.getElementById("passportFaceScore");
+const passportNumberMatch = document.getElementById("passportNumberMatch");
+const passportNameMatch = document.getElementById("passportNameMatch");
+const passportDobMatch = document.getElementById("passportDobMatch");
 
 let stream = null;
+let capturedPassportBase64 = null;
 
 const setResult = (data) => {
   resultJson.textContent = JSON.stringify(data, null, 2);
@@ -278,6 +288,58 @@ verifyIdentityBtn.addEventListener("click", async () => {
   );
 });
 
+if (passportUploadInput) {
+  passportUploadInput.addEventListener("change", async () => {
+    const file = passportUploadInput.files[0];
+    if (!file) {
+      return;
+    }
+    const preview = await fileToDataUrl(file);
+    if (passportPreview1) {
+      passportPreview1.src = preview;
+    }
+  });
+}
+
+if (comparePassportsBtn) {
+  comparePassportsBtn.addEventListener("click", async () => {
+    const file = passportUploadInput?.files?.[0];
+    if (!file) {
+      setResult({ error: "Upload the first document image." });
+      return;
+    }
+
+    if (!capturedPassportBase64) {
+      if (!stream) {
+        setResult({ error: "Start the webcam to capture the second document image." });
+        return;
+      }
+      const frame = captureFrame();
+      if (!frame) {
+        setResult({ error: "Unable to capture the document frame." });
+        return;
+      }
+      capturedPassportBase64 = frame;
+      if (passportPreview2) {
+        passportPreview2.src = base64ToDataUrl(frame);
+      }
+    }
+
+    const firstDocumentImageBase64 = await fileToBase64(file);
+    const secondDocumentImageBase64 = capturedPassportBase64;
+
+    const response = await fetch("/api/documents/compare-documents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ firstDocumentImageBase64, secondDocumentImageBase64 }),
+    });
+
+    const data = await response.json();
+    setResult(data);
+    setPassportSummary(data);
+  });
+}
+
 function captureFrame() {
   if (!stream) {
     return null;
@@ -440,6 +502,55 @@ function setVerifyPreview(docSrc, liveSrc, similarity) {
   const label = `${percent.toFixed(1)}% match`;
   verifyScoreDoc.textContent = label;
   verifyScoreLive.textContent = label;
+}
+
+function setPassportSummary(data) {
+  if (!passportSummary) {
+    return;
+  }
+
+  const scorePercent = data?.faceMatchScorePercent ?? null;
+  const score = data?.faceMatchScore ?? null;
+  const threshold = data?.faceMatchThreshold ?? null;
+
+  passportSummary.hidden = false;
+
+  if (passportFaceScore) {
+    if (scorePercent != null) {
+      passportFaceScore.textContent = `${Number(scorePercent).toFixed(1)}%`;
+    } else if (score != null) {
+      const percent = score > 1 ? score * 100 : score * 100;
+      passportFaceScore.textContent = `${Number(percent).toFixed(1)}%`;
+    } else {
+      passportFaceScore.textContent = "â€”";
+    }
+  }
+
+  updateBadge(passportNumberMatch, data?.isDocumentNumberMatch);
+  updateBadge(passportNameMatch, data?.isNameMatch);
+  updateBadge(passportDobMatch, data?.isDobMatch);
+
+  if (threshold != null && passportFaceScore && score != null) {
+    const label = threshold >= 1 ? `${threshold}%` : `${(threshold * 100).toFixed(0)}%`;
+    passportFaceScore.textContent = `${passportFaceScore.textContent} (threshold ${label})`;
+  }
+}
+
+function updateBadge(element, isMatch) {
+  if (!element) {
+    return;
+  }
+
+  element.classList.remove("match", "mismatch");
+  if (isMatch === true) {
+    element.classList.add("match");
+    element.textContent = `${element.textContent.split(":")[0]}: match`;
+  } else if (isMatch === false) {
+    element.classList.add("mismatch");
+    element.textContent = `${element.textContent.split(":")[0]}: mismatch`;
+  } else {
+    element.textContent = element.textContent.split(":")[0];
+  }
 }
 
 async function submitDocument(url) {

@@ -14,6 +14,37 @@ public record DocumentProcessRequest
     public string? LivePortraitBase64 { get; init; }
 }
 
+public record IdentityDocumentCompareRequest
+{
+    public string? FirstDocumentImageBase64 { get; init; }
+    public string? SecondDocumentImageBase64 { get; init; }
+}
+
+public record IdentityDocumentInfo
+{
+    public string? Name { get; init; }
+    public string? Surname { get; init; }
+    public string? DocumentNumber { get; init; }
+    public string? DateOfBirth { get; init; }
+    public string? Gender { get; init; }
+    public string? MrzText { get; init; }
+    public string? PortraitImageBase64 { get; init; }
+    public string? RawResponseJson { get; init; }
+}
+
+public record IdentityDocumentComparisonResult
+{
+    public IdentityDocumentInfo? FirstDocument { get; init; }
+    public IdentityDocumentInfo? SecondDocument { get; init; }
+    public double? FaceMatchScore { get; init; }
+    public double? FaceMatchScorePercent { get; init; }
+    public bool IsFaceMatch { get; init; }
+    public bool IsDocumentNumberMatch { get; init; }
+    public bool IsNameMatch { get; init; }
+    public bool IsDobMatch { get; init; }
+    public double FaceMatchThreshold { get; init; }
+}
+
 public record DocRSummary
 {
     public string? TransactionId { get; init; }

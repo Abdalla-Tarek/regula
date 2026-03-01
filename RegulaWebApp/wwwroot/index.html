@@ -64,6 +64,37 @@
       </section>
 
       <section class="panel">
+        <h2>Identity Document Compare</h2>
+        <div class="row">
+          <input id="passportUploadInput" type="file" accept="image/*" />
+          <button id="comparePassportsBtn" class="primary">Compare Documents</button>
+        </div>
+        <div class="row match-row">
+          <div class="match-result passport-result">
+            <div class="match-card">
+              <img id="passportPreview1" alt="First document preview" />
+              <div class="match-score" id="passportLabel1">Uploaded document</div>
+            </div>
+            <div class="match-card">
+              <img id="passportPreview2" alt="Second document preview" />
+              <div class="match-score" id="passportLabel2">Captured document</div>
+            </div>
+          </div>
+          <div class="passport-summary" id="passportSummary" hidden>
+            <div class="passport-score">
+              <span class="label">Face Match</span>
+              <span class="value" id="passportFaceScore">â€”</span>
+            </div>
+            <div class="passport-flags">
+              <span class="badge" id="passportNumberMatch">Document #</span>
+              <span class="badge" id="passportNameMatch">Name</span>
+              <span class="badge" id="passportDobMatch">DOB</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
         <h2>Result</h2>
         <pre id="resultJson">{}</pre>
       </section>

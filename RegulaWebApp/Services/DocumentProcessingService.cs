@@ -106,6 +106,97 @@ public class DocumentProcessingService : IDocumentProcessingService
         });
     }
 
+    public async Task<IActionResult> ComparePassportsAsync(HttpRequest request)
+    {
+        var compareRequest = await request.ReadFromJsonAsync<IdentityDocumentCompareRequest>();
+        if (compareRequest is null)
+        {
+            return new BadRequestObjectResult(new { error = "Provide JSON body with firstDocumentImageBase64 and secondDocumentImageBase64." });
+        }
+
+        var firstImage = CleanBase64(compareRequest.FirstDocumentImageBase64 ?? string.Empty);
+        var secondImage = CleanBase64(compareRequest.SecondDocumentImageBase64 ?? string.Empty);
+
+        if (string.IsNullOrWhiteSpace(firstImage) || string.IsNullOrWhiteSpace(secondImage))
+        {
+            return new BadRequestObjectResult(new { error = "Both document images are required." });
+        }
+
+        var firstResult = await ProcessDocumentImageAsync(firstImage);
+        if (!string.IsNullOrWhiteSpace(firstResult.error))
+        {
+            return new ObjectResult(new { error = firstResult.error, details = firstResult.details })
+            {
+                StatusCode = firstResult.statusCode ?? StatusCodes.Status502BadGateway
+            };
+        }
+
+        var secondResult = await ProcessDocumentImageAsync(secondImage);
+        if (!string.IsNullOrWhiteSpace(secondResult.error))
+        {
+            return new ObjectResult(new { error = secondResult.error, details = secondResult.details })
+            {
+                StatusCode = secondResult.statusCode ?? StatusCodes.Status502BadGateway
+            };
+        }
+
+        var firstDocument = firstResult.info;
+        var secondDocument = secondResult.info;
+
+        if (firstDocument is null || secondDocument is null)
+        {
+            return new ObjectResult(new { error = "Unable to parse document data from DocR responses." })
+            {
+                StatusCode = StatusCodes.Status422UnprocessableEntity
+            };
+        }
+
+        if (string.IsNullOrWhiteSpace(firstDocument.PortraitImageBase64) ||
+            string.IsNullOrWhiteSpace(secondDocument.PortraitImageBase64))
+        {
+            return new ObjectResult(new { error = "Unable to extract document portrait(s) for face matching." })
+            {
+                StatusCode = StatusCodes.Status422UnprocessableEntity
+            };
+        }
+
+        var matchResult = await _regulaService.MatchFaces(
+            CleanBase64(firstDocument.PortraitImageBase64),
+            CleanBase64(secondDocument.PortraitImageBase64));
+
+        if (!string.IsNullOrWhiteSpace(matchResult.error))
+        {
+            return new ObjectResult(new { error = matchResult.error, details = matchResult.details })
+            {
+                StatusCode = matchResult.statusCode ?? StatusCodes.Status502BadGateway
+            };
+        }
+
+        var threshold = _optionsAccessor.Value.FaceApiThreshold ?? 0.85;
+        var normalizedSimilarity = NormalizeSimilarityScore(matchResult.similarity);
+        var faceMatchScorePercent = NormalizeSimilarityPercent(matchResult.similarity);
+        var isFaceMatch = normalizedSimilarity.HasValue && normalizedSimilarity.Value >= threshold;
+
+        var isDocumentNumberMatch = CompareNormalized(firstDocument.DocumentNumber, secondDocument.DocumentNumber);
+        var isNameMatch = CompareNames(firstDocument, secondDocument);
+        var isDobMatch = CompareDates(firstDocument.DateOfBirth, secondDocument.DateOfBirth);
+
+        var result = new IdentityDocumentComparisonResult
+        {
+            FirstDocument = firstDocument,
+            SecondDocument = secondDocument,
+            FaceMatchScore = normalizedSimilarity,
+            FaceMatchScorePercent = faceMatchScorePercent,
+            IsFaceMatch = isFaceMatch,
+            IsDocumentNumberMatch = isDocumentNumberMatch,
+            IsNameMatch = isNameMatch,
+            IsDobMatch = isDobMatch,
+            FaceMatchThreshold = threshold
+        };
+
+        return new OkObjectResult(result);
+    }
+
     private DocRProcessRequest BuildProcessPayload(
         DocumentProcessRequest request,
         bool forceAuth = true,
@@ -452,6 +543,41 @@ public class DocumentProcessingService : IDocumentProcessingService
             RightBottom = ReadPoint(element, "RightBottom"),
             LeftBottom = ReadPoint(element, "LeftBottom")
         };
+    }
+
+    private async Task<(IdentityDocumentInfo? info, int? statusCode, string? error, string? details)> ProcessDocumentImageAsync(string base64)
+    {
+        var request = new DocumentProcessRequest
+        {
+            Images = new List<DocumentImage> { new(base64, null) }
+        };
+
+        var payload = BuildProcessPayload(request);
+        var response = await SendToDocRRawAsync(payload);
+
+        if (!string.IsNullOrWhiteSpace(response.error))
+        {
+            return (null, response.statusCode, response.error, response.details);
+        }
+
+        var info = ExtractDocumentInfo(response.json ?? string.Empty);
+        return (info, response.statusCode, null, null);
+    }
+
+    private async Task<(string? json, int? statusCode, string? error, string? details)> SendToDocRRawAsync(object payload)
+    {
+        var options = _optionsAccessor.Value;
+        var client = _httpClientFactory.CreateClient("DocR");
+
+        using var response = await client.PostAsJsonAsync(options.ProcessEndpoint, payload);
+        var content = await response.Content.ReadAsStringAsync();
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return (null, (int)response.StatusCode, "DocR process request failed.", content);
+        }
+
+        return (content, (int)response.StatusCode, null, null);
     }
 
     private static DocumentRegion? BuildRegionFromCorners(
@@ -1186,6 +1312,12 @@ public class DocumentProcessingService : IDocumentProcessingService
         {
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
+            var best = FindBestImageBase64(root);
+            if (!string.IsNullOrWhiteSpace(best))
+            {
+                return best;
+            }
+
             var preferredKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
                 "portrait",
@@ -1211,6 +1343,240 @@ public class DocumentProcessingService : IDocumentProcessingService
         {
             return null;
         }
+    }
+
+    private static string? FindBestImageBase64(JsonElement root)
+    {
+        var candidates = new List<(string value, string path)>();
+        CollectBase64Candidates(root, "root", candidates);
+        if (candidates.Count == 0)
+        {
+            return null;
+        }
+
+        var best = candidates
+            .Select(item => (item.value, score: ScoreImageCandidate(item.value, item.path)))
+            .OrderByDescending(item => item.score)
+            .FirstOrDefault();
+
+        return best.value;
+    }
+
+    private static void CollectBase64Candidates(JsonElement element, string path, List<(string value, string path)> output)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in element.EnumerateObject())
+            {
+                var nextPath = $"{path}.{prop.Name}";
+                if (prop.Value.ValueKind == JsonValueKind.String)
+                {
+                    var value = prop.Value.GetString();
+                    if (IsProbablyBase64(value))
+                    {
+                        output.Add((value ?? string.Empty, nextPath));
+                    }
+                }
+
+                CollectBase64Candidates(prop.Value, nextPath, output);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            var index = 0;
+            foreach (var item in element.EnumerateArray())
+            {
+                var nextPath = $"{path}[{index}]";
+                CollectBase64Candidates(item, nextPath, output);
+                index++;
+            }
+        }
+    }
+
+    private static double ScoreImageCandidate(string base64, string path)
+    {
+        var score = 0.0;
+        var lowerPath = path.ToLowerInvariant();
+
+        if (lowerPath.Contains("portrait") || lowerPath.Contains("face"))
+        {
+            score += 50;
+        }
+
+        if (lowerPath.Contains("mrz") || lowerPath.Contains("signature"))
+        {
+            score -= 20;
+        }
+
+        if (lowerPath.Contains("logo") || lowerPath.Contains("emblem") || lowerPath.Contains("flag"))
+        {
+            score -= 30;
+        }
+
+        score += Math.Min(base64.Length / 1000.0, 50);
+        return score;
+    }
+
+    private static IdentityDocumentInfo ExtractDocumentInfo(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            var fields = ExtractDocVisualFields(root);
+            var surname = GetFieldValue(fields, "Surname", "Last Name", "Family Name");
+            var name = GetFieldValue(fields, "Given Names", "Given Name", "First Name", "Name", "Full Name");
+            var documentNumber = GetFieldValue(fields, "Document Number", "Document No.", "Doc Number", "Passport Number", "Passport No.", "ID Number", "Identity Number");
+            var dateOfBirth = GetFieldValue(fields, "Date of Birth", "Birth Date", "DOB");
+            var gender = GetFieldValue(fields, "Sex", "Gender");
+            var mrzText = ExtractMrzRawText(root);
+            var portrait = ExtractDocumentPortraitBase64(json);
+
+            return new IdentityDocumentInfo
+            {
+                Name = name,
+                Surname = surname,
+                DocumentNumber = documentNumber,
+                DateOfBirth = dateOfBirth,
+                Gender = gender,
+                MrzText = mrzText,
+                PortraitImageBase64 = CleanBase64(portrait ?? string.Empty),
+                RawResponseJson = json
+            };
+        }
+        catch
+        {
+            return new IdentityDocumentInfo
+            {
+                RawResponseJson = json
+            };
+        }
+    }
+
+    private static string? ExtractMrzRawText(JsonElement root)
+    {
+        var direct = FindFirstString(root, new[]
+        {
+            "mrz",
+            "MRZ",
+            "mrzText",
+            "MRZText",
+            "mrzString",
+            "MRZString",
+            "rawMRZ",
+            "rawMrz",
+            "mrzRaw",
+            "MRZRaw",
+            "mrzTextRaw"
+        });
+
+        if (!string.IsNullOrWhiteSpace(direct))
+        {
+            return direct;
+        }
+
+        var mrzNode = FindFirstObjectByNameIgnoreCase(root, "MRZ") ?? FindFirstObjectByNameIgnoreCase(root, "Mrz");
+        if (mrzNode.HasValue)
+        {
+            var candidate = FindFirstString(mrzNode.Value, new[] { "Text", "text", "Raw", "raw", "value", "Value" });
+            if (!string.IsNullOrWhiteSpace(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private static double? NormalizeSimilarityScore(double? value)
+    {
+        if (!value.HasValue)
+        {
+            return null;
+        }
+
+        var number = value.Value;
+        if (number < 0)
+        {
+            return null;
+        }
+
+        if (number > 1 && number <= 100)
+        {
+            return Math.Round(number / 100.0, 4);
+        }
+
+        return Math.Round(number, 4);
+    }
+
+    private static bool CompareNormalized(string? left, string? right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+        {
+            return false;
+        }
+
+        return NormalizeValue(left) == NormalizeValue(right);
+    }
+
+    private static bool CompareNames(IdentityDocumentInfo first, IdentityDocumentInfo second)
+    {
+        var leftName = NormalizeValue(first.Name);
+        var rightName = NormalizeValue(second.Name);
+        var leftSurname = NormalizeValue(first.Surname);
+        var rightSurname = NormalizeValue(second.Surname);
+
+        if (!string.IsNullOrWhiteSpace(leftName) && !string.IsNullOrWhiteSpace(rightName) &&
+            !string.IsNullOrWhiteSpace(leftSurname) && !string.IsNullOrWhiteSpace(rightSurname))
+        {
+            return leftName == rightName && leftSurname == rightSurname;
+        }
+
+        var fullLeft = NormalizeValue($"{first.Name} {first.Surname}");
+        var fullRight = NormalizeValue($"{second.Name} {second.Surname}");
+
+        if (!string.IsNullOrWhiteSpace(fullLeft) && !string.IsNullOrWhiteSpace(fullRight))
+        {
+            return fullLeft == fullRight;
+        }
+
+        return false;
+    }
+
+    private static bool CompareDates(string? left, string? right)
+    {
+        var leftNorm = NormalizeDate(left);
+        var rightNorm = NormalizeDate(right);
+        if (string.IsNullOrWhiteSpace(leftNorm) || string.IsNullOrWhiteSpace(rightNorm))
+        {
+            return false;
+        }
+
+        return leftNorm == rightNorm;
+    }
+
+    private static string NormalizeValue(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var trimmed = value.Trim().ToUpperInvariant();
+        var filtered = new string(trimmed.Where(char.IsLetterOrDigit).ToArray());
+        return filtered;
+    }
+
+    private static string NormalizeDate(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var digits = new string(value.Where(char.IsDigit).ToArray());
+        return digits;
     }
 
     private static string? FindFirstBase64ByKeys(JsonElement element, HashSet<string> keys)
