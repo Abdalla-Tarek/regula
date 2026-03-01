@@ -337,6 +337,7 @@ if (comparePassportsBtn) {
     const data = await response.json();
     setResult(data);
     setPassportSummary(data);
+    capturedPassportBase64 = null;
   });
 }
 

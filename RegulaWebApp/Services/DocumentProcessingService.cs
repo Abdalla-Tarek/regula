@@ -1349,6 +1349,8 @@ public class DocumentProcessingService : IDocumentProcessingService
     {
         var candidates = new List<(string value, string path)>();
         CollectBase64Candidates(root, "root", candidates);
+        CollectPortraitFromDocGraphics(root, candidates);
+        CollectPortraitFromImages(root, candidates);
         if (candidates.Count == 0)
         {
             return null;
@@ -1417,6 +1419,83 @@ public class DocumentProcessingService : IDocumentProcessingService
         return score;
     }
 
+    private static void CollectPortraitFromDocGraphics(JsonElement root, List<(string value, string path)> output)
+    {
+        var node = FindFirstObjectByNameIgnoreCase(root, "DocGraphicsInfo");
+        if (!node.HasValue)
+        {
+            return;
+        }
+
+        if (!TryGetPropertyIgnoreCase(node.Value, "pArrayFields", out var fields) ||
+            fields.ValueKind != JsonValueKind.Array)
+        {
+            return;
+        }
+
+        var index = 0;
+        foreach (var field in fields.EnumerateArray())
+        {
+            var name = ReadString(field, "FieldName");
+            var imageBase64 = ReadString(field, "image", "image");
+            if (!string.IsNullOrWhiteSpace(name) &&
+                !string.IsNullOrWhiteSpace(imageBase64) &&
+                string.Equals(name.Trim(), "Portrait", StringComparison.OrdinalIgnoreCase))
+            {
+                output.Add((imageBase64, $"DocGraphicsInfo.pArrayFields[{index}].Portrait"));
+            }
+
+            index++;
+        }
+    }
+
+    private static void CollectPortraitFromImages(JsonElement root, List<(string value, string path)> output)
+    {
+        var node = FindFirstObjectByNameIgnoreCase(root, "Images");
+        if (!node.HasValue)
+        {
+            return;
+        }
+
+        if (!TryGetPropertyIgnoreCase(node.Value, "fieldList", out var fieldList) ||
+            fieldList.ValueKind != JsonValueKind.Array)
+        {
+            return;
+        }
+
+        var index = 0;
+        foreach (var field in fieldList.EnumerateArray())
+        {
+            var name = ReadString(field, "fieldName");
+            if (string.IsNullOrWhiteSpace(name) ||
+                !string.Equals(name.Trim(), "Portrait", StringComparison.OrdinalIgnoreCase))
+            {
+                index++;
+                continue;
+            }
+
+            if (!TryGetPropertyIgnoreCase(field, "valueList", out var valueList) ||
+                valueList.ValueKind != JsonValueKind.Array)
+            {
+                index++;
+                continue;
+            }
+
+            var valueIndex = 0;
+            foreach (var item in valueList.EnumerateArray())
+            {
+                var value = ReadString(item, "value");
+                if (IsProbablyBase64(value))
+                {
+                    output.Add((value ?? string.Empty, $"Images.fieldList[{index}].valueList[{valueIndex}].Portrait"));
+                }
+                valueIndex++;
+            }
+
+            index++;
+        }
+    }
+
     private static IdentityDocumentInfo ExtractDocumentInfo(string json)
     {
         try
@@ -1425,11 +1504,27 @@ public class DocumentProcessingService : IDocumentProcessingService
             var root = doc.RootElement;
 
             var fields = ExtractDocVisualFields(root);
-            var surname = GetFieldValue(fields, "Surname", "Last Name", "Family Name");
-            var name = GetFieldValue(fields, "Given Names", "Given Name", "First Name", "Name", "Full Name");
-            var documentNumber = GetFieldValue(fields, "Document Number", "Document No.", "Doc Number", "Passport Number", "Passport No.", "ID Number", "Identity Number");
-            var dateOfBirth = GetFieldValue(fields, "Date of Birth", "Birth Date", "DOB");
-            var gender = GetFieldValue(fields, "Sex", "Gender");
+            var textFields = ExtractTextFieldValues(root);
+
+            var surname = FirstNonEmpty(
+                GetFieldValue(fields, "Surname", "Last Name", "Family Name"),
+                GetFieldValue(textFields, "Surname", "Last Name", "Family Name"));
+
+            var name = FirstNonEmpty(
+                GetFieldValue(fields, "Given Names", "Given Name", "First Name", "Name", "Full Name", "Surname And Given Names"),
+                GetFieldValue(textFields, "Given Names", "Given Name", "First Name", "Name", "Full Name", "Surname And Given Names"));
+
+            var documentNumber = FirstNonEmpty(
+                GetFieldValue(fields, "Document Number", "Document No.", "Doc Number", "Passport Number", "Passport No.", "ID Number", "Identity Number", "Identity Card Number"),
+                GetFieldValue(textFields, "Document Number", "Document No.", "Doc Number", "Passport Number", "Passport No.", "ID Number", "Identity Number", "Identity Card Number"));
+
+            var dateOfBirth = FirstNonEmpty(
+                GetFieldValue(fields, "Date of Birth", "Birth Date", "DOB"),
+                GetFieldValue(textFields, "Date of Birth", "Birth Date", "DOB"));
+
+            var gender = FirstNonEmpty(
+                GetFieldValue(fields, "Sex", "Gender"),
+                GetFieldValue(textFields, "Sex", "Gender"));
             var mrzText = ExtractMrzRawText(root);
             var portrait = ExtractDocumentPortraitBase64(json);
 
@@ -1452,6 +1547,66 @@ public class DocumentProcessingService : IDocumentProcessingService
                 RawResponseJson = json
             };
         }
+    }
+
+    private static Dictionary<string, string> ExtractTextFieldValues(JsonElement root)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var textNode = FindFirstObjectByNameIgnoreCase(root, "Text");
+        if (!textNode.HasValue)
+        {
+            return result;
+        }
+
+        if (!TryGetPropertyIgnoreCase(textNode.Value, "fieldList", out var fieldList) ||
+            fieldList.ValueKind != JsonValueKind.Array)
+        {
+            return result;
+        }
+
+        foreach (var field in fieldList.EnumerateArray())
+        {
+            var name = ReadString(field, "fieldName");
+            var value = ReadString(field, "value");
+            if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(value))
+            {
+                result[name.Trim()] = value.Trim();
+            }
+        }
+
+        return result;
+    }
+
+    private static string? ReadString(JsonElement element, params string[] path)
+    {
+        var current = element;
+        foreach (var segment in path)
+        {
+            if (!TryGetPropertyIgnoreCase(current, segment, out var next))
+            {
+                return null;
+            }
+            current = next;
+        }
+
+        if (current.ValueKind == JsonValueKind.String)
+        {
+            return current.GetString();
+        }
+
+        return null;
+    }
+
+    private static string? FirstNonEmpty(params string?[] values)
+    {
+        foreach (var value in values)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+        }
+        return null;
     }
 
     private static string? ExtractMrzRawText(JsonElement root)
