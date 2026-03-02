@@ -326,6 +326,9 @@ pre {
 
 .fraud-name {
   font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .fraud-status {
@@ -360,6 +363,32 @@ pre {
 .fraud-details {
   color: var(--muted);
   font-size: 0.9rem;
+}
+
+.fraud-help-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: #f7f4ef;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.fraud-help-btn:hover {
+  border-color: #cdbfae;
+  color: #3a2f24;
+}
+
+.fraud-help {
+  background: #f9f6f2;
+  border: 1px dashed #e2d6c7;
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 0.85rem;
+  color: #5f5246;
 }
 
 .fraud-na {

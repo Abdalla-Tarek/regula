@@ -660,10 +660,36 @@ function renderFraudSummary(data) {
 
     const header = document.createElement("div");
     header.className = "fraud-header";
+    let help = null;
+    const helpText = getFraudHelpText(check?.name);
+    if (helpText) {
+      const helpBtn = document.createElement("button");
+      helpBtn.type = "button";
+      helpBtn.className = "fraud-help-btn";
+      helpBtn.setAttribute("aria-label", "Explain this check");
+      helpBtn.setAttribute("title", "What does this check mean?");
+      helpBtn.textContent = "?";
+
+      help = document.createElement("div");
+      help.className = "fraud-help";
+      help.hidden = true;
+      help.textContent = helpText;
+
+      helpBtn.addEventListener("click", () => {
+        const isHidden = help.hidden;
+        help.hidden = !isHidden;
+        helpBtn.setAttribute("aria-expanded", String(isHidden));
+      });
+
+      name.appendChild(helpBtn);
+    }
     header.appendChild(name);
     header.appendChild(status);
 
     item.appendChild(header);
+    if (help) {
+      item.appendChild(help);
+    }
     if (details.textContent) {
       item.appendChild(details);
     }
@@ -675,6 +701,36 @@ function renderFraudSummary(data) {
     fraudNotApplicable.hidden = true;
     fraudNotApplicableList.innerHTML = "";
   }
+}
+
+function getFraudHelpText(name) {
+  const key = String(name || "").trim().toLowerCase();
+  const help = {
+    "document type identification":
+      "Checks whether the document matches a known template (type, issuer, and format).",
+    "image quality assessment":
+      "Evaluates image clarity, focus, lighting, and noise to ensure the document can be reliably analyzed.",
+    "document liveness check":
+      "Looks for signs that the document is a real physical document and not a recaptured image or screen.",
+    "hologram / ovi / mli / dynaprint check":
+      "Verifies optical security features like holograms, OVI/MLI inks, and dynamic print elements.",
+    "mrz (machine readable zone) check":
+      "Validates the MRZ text and checksum to confirm consistency and integrity.",
+    "visual zone ocr validation":
+      "Checks OCR results from the visual zone to ensure text is readable and consistent.",
+    "photo embedding check":
+      "Confirms the portrait area exists and matches expected placement/structure.",
+    "security pattern / image pattern check":
+      "Evaluates security patterns and background features to detect tampering.",
+    "extended mrz & extended ocr":
+      "Cross-compares MRZ data with extended OCR fields to detect mismatches.",
+    "geometry check":
+      "Verifies document position, angle, and perspective to ensure proper capture and reduce spoofing.",
+    "data cross-validation":
+      "Compares data across sources (MRZ, OCR, barcode, etc.) to confirm consistency."
+  };
+
+  return help[key] || "";
 }
 
 function normalizeStatus(status) {
