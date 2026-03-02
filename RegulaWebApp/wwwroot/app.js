@@ -639,7 +639,9 @@ function renderFraudSummary(data) {
   }
 
   fraudChecks.innerHTML = "";
-  checks.forEach((check) => {
+  checks
+    .filter((check) => normalizeStatus(check?.status) !== "na")
+    .forEach((check) => {
     const item = document.createElement("div");
     item.className = "fraud-check";
 
@@ -668,21 +670,9 @@ function renderFraudSummary(data) {
     fraudChecks.appendChild(item);
   });
 
-  const naList = Array.isArray(data?.notApplicable) ? data.notApplicable : [];
   if (fraudNotApplicable && fraudNotApplicableList) {
-    if (!naList.length) {
-      fraudNotApplicable.hidden = true;
-      fraudNotApplicableList.innerHTML = "";
-    } else {
-      fraudNotApplicable.hidden = false;
-      fraudNotApplicableList.innerHTML = "";
-      naList.forEach((name) => {
-        const pill = document.createElement("span");
-        pill.className = "fraud-pill";
-        pill.textContent = name;
-        fraudNotApplicableList.appendChild(pill);
-      });
-    }
+    fraudNotApplicable.hidden = true;
+    fraudNotApplicableList.innerHTML = "";
   }
 }
 

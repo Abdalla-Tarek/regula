@@ -188,16 +188,10 @@ public class DocumentFraudService : IDocumentFraudService
             AddCheck(checks, notApplicable, EvaluateDocumentLiveness(root));
             AddCheck(checks, notApplicable, EvaluateHologramOvi(root));
             AddCheck(checks, notApplicable, EvaluateMrz(root));
-            AddCheck(checks, notApplicable, EvaluateBarcode(root));
             AddCheck(checks, notApplicable, EvaluateVisualOcr(root));
             AddCheck(checks, notApplicable, EvaluatePhotoEmbedding(root));
-            AddCheck(checks, notApplicable, EvaluatePortraitCrossCheck(root));
             AddCheck(checks, notApplicable, EvaluateSecurityPattern(root));
-            AddCheck(checks, notApplicable, EvaluateIpi(root));
-            AddCheck(checks, notApplicable, EvaluateEncryptedIpi(root));
-            AddCheck(checks, notApplicable, EvaluateUvIr(root));
             AddCheck(checks, notApplicable, EvaluateExtendedMrzOcr(root));
-            AddCheck(checks, notApplicable, EvaluateAxialProtection(root));
             AddCheck(checks, notApplicable, EvaluateGeometry(root));
             AddCheck(checks, notApplicable, EvaluateDataCrossValidation(root));
 
@@ -433,30 +427,6 @@ public class DocumentFraudService : IDocumentFraudService
         };
     }
 
-    private static FraudCheckResult EvaluateBarcode(JsonElement root)
-    {
-        var node = FindFirstObjectByNameIgnoreCase(root, "DocBarCodeInfo");
-        if (!node.HasValue)
-        {
-            return NotApplicable("Barcode & QR Code Check", "No DocBarCodeInfo section in response.");
-        }
-
-        var codeResult = ReadInt(node.Value, "pArrayFields", "0", "bcCodeResult");
-        var decodeType = ReadInt(node.Value, "pArrayFields", "0", "bcType_DECODE");
-        var status = codeResult.HasValue && codeResult.Value > 0 ? "pass" : "fail";
-
-        var details = status == "pass"
-            ? $"Barcode decoded (bcCodeResult={codeResult}, type={decodeType})."
-            : "Barcode present but decoding failed or returned no data.";
-
-        return new FraudCheckResult
-        {
-            Name = "Barcode & QR Code Check",
-            Status = status,
-            Details = details,
-            EvidencePaths = new List<string> { "ContainerList.List[].DocBarCodeInfo" }
-        };
-    }
     private static FraudCheckResult EvaluateVisualOcr(JsonElement root)
     {
         var textNode = FindFirstObjectByNameIgnoreCase(root, "Text");
@@ -536,27 +506,6 @@ public class DocumentFraudService : IDocumentFraudService
         };
     }
 
-    private static FraudCheckResult EvaluatePortraitCrossCheck(JsonElement root)
-    {
-        var hasFaceApi = FindFirstObjectByNameIgnoreCase(root, "faceApi").HasValue ||
-                         FindFirstObjectByNameIgnoreCase(root, "FaceApi").HasValue;
-        var hasRfid = FindFirstObjectByNameIgnoreCase(root, "RFID").HasValue ||
-                      FindFirstObjectByNameIgnoreCase(root, "Rfid").HasValue;
-
-        if (!hasFaceApi && !hasRfid)
-        {
-            return NotApplicable("Portrait / Face Cross-Check", "No face API or RFID portrait data in response.");
-        }
-
-        return new FraudCheckResult
-        {
-            Name = "Portrait / Face Cross-Check",
-            Status = "unknown",
-            Details = "Face comparison data present but mapping is not implemented yet.",
-            EvidencePaths = new List<string> { "ContainerList.List[].faceApi", "ContainerList.List[].RFID" }
-        };
-    }
-
     private static FraudCheckResult EvaluateSecurityPattern(JsonElement root)
     {
         var statusNode = FindFirstObjectByNameIgnoreCase(root, "Status");
@@ -586,58 +535,7 @@ public class DocumentFraudService : IDocumentFraudService
             EvidencePaths = new List<string> { "ContainerList.List[].Status.detailsOptical.security" }
         };
     }
-    private static FraudCheckResult EvaluateIpi(JsonElement root)
-    {
-        var node = FindFirstObjectByNameIgnoreCase(root, "IPI");
-        if (!node.HasValue)
-        {
-            return NotApplicable("IPI (Invisible Personal Information) Check", "No IPI data in response.");
-        }
-
-        return new FraudCheckResult
-        {
-            Name = "IPI (Invisible Personal Information) Check",
-            Status = "unknown",
-            Details = "IPI data present but parsing is not implemented.",
-            EvidencePaths = new List<string> { "ContainerList.List[].IPI" }
-        };
-    }
-
-    private static FraudCheckResult EvaluateEncryptedIpi(JsonElement root)
-    {
-        var node = FindFirstObjectByNameIgnoreCase(root, "EncryptedIpi");
-        if (!node.HasValue)
-        {
-            return NotApplicable("Encrypted IPI Check", "No Encrypted IPI data in response.");
-        }
-
-        return new FraudCheckResult
-        {
-            Name = "Encrypted IPI Check",
-            Status = "unknown",
-            Details = "Encrypted IPI data present but parsing is not implemented.",
-            EvidencePaths = new List<string> { "ContainerList.List[].EncryptedIpi" }
-        };
-    }
-
-    private static FraudCheckResult EvaluateUvIr(JsonElement root)
-    {
-        var uv = FindFirstObjectByNameIgnoreCase(root, "UV");
-        var ir = FindFirstObjectByNameIgnoreCase(root, "IR");
-        if (!uv.HasValue && !ir.HasValue)
-        {
-            return NotApplicable("UV / IR Security Checks", "No UV/IR data in response.");
-        }
-
-        return new FraudCheckResult
-        {
-            Name = "UV / IR Security Checks",
-            Status = "unknown",
-            Details = "UV/IR data present but parsing is not implemented.",
-            EvidencePaths = new List<string> { "ContainerList.List[].UV", "ContainerList.List[].IR" }
-        };
-    }
-
+    
     private static FraudCheckResult EvaluateExtendedMrzOcr(JsonElement root)
     {
         var textNode = FindFirstObjectByNameIgnoreCase(root, "Text");
@@ -684,23 +582,6 @@ public class DocumentFraudService : IDocumentFraudService
                 ? "MRZ/OCR extended field comparisons passed."
                 : "No mismatches found, but comparison status is not confirmed.",
             EvidencePaths = new List<string> { "ContainerList.List[].Text.comparisonStatus" }
-        };
-    }
-
-    private static FraudCheckResult EvaluateAxialProtection(JsonElement root)
-    {
-        var node = FindFirstObjectByNameIgnoreCase(root, "AxialProtection");
-        if (!node.HasValue)
-        {
-            return NotApplicable("Axial Protection Check", "No axial protection data in response.");
-        }
-
-        return new FraudCheckResult
-        {
-            Name = "Axial Protection Check",
-            Status = "unknown",
-            Details = "Axial protection data present but parsing is not implemented.",
-            EvidencePaths = new List<string> { "ContainerList.List[].AxialProtection" }
         };
     }
 
