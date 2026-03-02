@@ -11,6 +11,7 @@ builder.Services.Configure<RegulaOptions>(builder.Configuration.GetSection("Regu
 builder.Services.Configure<DocROptions>(builder.Configuration.GetSection("DocR"));
 builder.Services.AddScoped<IRegulaService, RegulaService>();
 builder.Services.AddScoped<IDocumentProcessingService, DocumentProcessingService>();
+builder.Services.AddScoped<IDocumentFraudService, DocumentFraudService>();
 
 builder.Services.AddHttpClient("Regula", (sp, client) =>
 {

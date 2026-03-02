@@ -25,6 +25,15 @@ const docInput = document.getElementById("docInput");
 const docScenario = document.getElementById("docScenario");
 const docProcessBtn = document.getElementById("docProcessBtn");
 const docFraudBtn = document.getElementById("docFraudBtn");
+const fraudDocInput = document.getElementById("fraudDocInput");
+const fraudScenario = document.getElementById("fraudScenario");
+const fraudDetectBtn = document.getElementById("fraudDetectBtn");
+const fraudSummary = document.getElementById("fraudSummary");
+const fraudTransaction = document.getElementById("fraudTransaction");
+const fraudOverall = document.getElementById("fraudOverall");
+const fraudChecks = document.getElementById("fraudChecks");
+const fraudNotApplicable = document.getElementById("fraudNotApplicable");
+const fraudNotApplicableList = document.getElementById("fraudNotApplicableList");
 const verifyDocInput = document.getElementById("verifyDocInput");
 const verifyIdentityBtn = document.getElementById("verifyIdentityBtn");
 const verifyPreviewDoc = document.getElementById("verifyPreviewDoc");
@@ -241,6 +250,33 @@ docProcessBtn.addEventListener("click", async () => {
 if (docFraudBtn) {
   docFraudBtn.addEventListener("click", async () => {
     await submitDocument("/api/documents/fraud-detection");
+  });
+}
+
+if (fraudDetectBtn) {
+  fraudDetectBtn.addEventListener("click", async () => {
+    const files = Array.from(fraudDocInput?.files || []);
+    if (files.length === 0) {
+      setResult({ error: "Select document images or a PDF." });
+      return;
+    }
+
+    const formData = new FormData();
+    files.forEach((file) => formData.append("images", file));
+
+    const scenario = fraudScenario?.value?.trim();
+    if (scenario) {
+      formData.append("scenario", scenario);
+    }
+
+    const response = await fetch("/api/document-fraud/detect", {
+      method: "POST",
+      body: formData,
+    });
+
+    const data = await response.json();
+    setResult(data);
+    renderFraudSummary(data);
   });
 }
 
@@ -576,4 +612,93 @@ async function submitDocument(url) {
 
   const data = await response.json();
   setResult(data);
+}
+
+function renderFraudSummary(data) {
+  if (!fraudSummary || !fraudChecks) {
+    return;
+  }
+
+  const checks = Array.isArray(data?.checks) ? data.checks : [];
+  if (!checks.length) {
+    fraudSummary.hidden = true;
+    fraudChecks.innerHTML = "";
+    if (fraudNotApplicable) {
+      fraudNotApplicable.hidden = true;
+    }
+    return;
+  }
+
+  fraudSummary.hidden = false;
+
+  if (fraudTransaction) {
+    fraudTransaction.textContent = data?.transactionId ?? data?.TransactionId ?? "—";
+  }
+  if (fraudOverall) {
+    fraudOverall.textContent = data?.overallStatus ?? data?.OverallStatus ?? "—";
+  }
+
+  fraudChecks.innerHTML = "";
+  checks.forEach((check) => {
+    const item = document.createElement("div");
+    item.className = "fraud-check";
+
+    const name = document.createElement("div");
+    name.className = "fraud-name";
+    name.textContent = check?.name ?? "Check";
+
+    const status = document.createElement("span");
+    status.className = `fraud-status ${normalizeStatus(check?.status)}`;
+    status.textContent = formatStatus(check?.status);
+
+    const details = document.createElement("div");
+    details.className = "fraud-details";
+    details.textContent = check?.details ?? "";
+
+    const header = document.createElement("div");
+    header.className = "fraud-header";
+    header.appendChild(name);
+    header.appendChild(status);
+
+    item.appendChild(header);
+    if (details.textContent) {
+      item.appendChild(details);
+    }
+
+    fraudChecks.appendChild(item);
+  });
+
+  const naList = Array.isArray(data?.notApplicable) ? data.notApplicable : [];
+  if (fraudNotApplicable && fraudNotApplicableList) {
+    if (!naList.length) {
+      fraudNotApplicable.hidden = true;
+      fraudNotApplicableList.innerHTML = "";
+    } else {
+      fraudNotApplicable.hidden = false;
+      fraudNotApplicableList.innerHTML = "";
+      naList.forEach((name) => {
+        const pill = document.createElement("span");
+        pill.className = "fraud-pill";
+        pill.textContent = name;
+        fraudNotApplicableList.appendChild(pill);
+      });
+    }
+  }
+}
+
+function normalizeStatus(status) {
+  const value = String(status || "").toLowerCase();
+  if (value === "pass" || value === "passed") return "pass";
+  if (value === "fail" || value === "failed") return "fail";
+  if (value === "not_applicable" || value === "not applicable" || value === "na") return "na";
+  return "unknown";
+}
+
+function formatStatus(status) {
+  const value = String(status || "").toLowerCase();
+  if (value === "pass" || value === "passed") return "Pass";
+  if (value === "fail" || value === "failed") return "Fail";
+  if (value === "not_applicable" || value === "not applicable" || value === "na") return "N/A";
+  if (!value) return "Unknown";
+  return value.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }

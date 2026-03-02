@@ -58,6 +58,22 @@ public record DocRSummary
     public DocumentPositionInfo? DocumentPosition { get; init; }
 }
 
+public record FraudCheckResult
+{
+    public string Name { get; init; } = string.Empty;
+    public string Status { get; init; } = "unknown";
+    public string? Details { get; init; }
+    public List<string> EvidencePaths { get; init; } = new();
+}
+
+public record FraudSummary
+{
+    public string? TransactionId { get; init; }
+    public string? OverallStatus { get; init; }
+    public List<FraudCheckResult> Checks { get; init; } = new();
+    public List<string> NotApplicable { get; init; } = new();
+}
+
 public record DocRValiditySummary
 {
     public List<string> Valid { get; init; } = new();

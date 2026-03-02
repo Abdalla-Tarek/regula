@@ -129,6 +129,32 @@
       </section>
 
       <section class="panel">
+        <h2>Document Fraud Detection</h2>
+        <div class="row">
+          <input id="fraudDocInput" type="file" accept="image/*,.pdf" multiple />
+          <input id="fraudScenario" type="text" placeholder="Scenario (optional)" />
+          <button id="fraudDetectBtn" class="primary">Detect Fraud</button>
+        </div>
+        <div class="fraud-summary" id="fraudSummary" hidden>
+          <div class="fraud-meta">
+            <div>
+              <span class="label">Transaction</span>
+              <span class="value" id="fraudTransaction">—</span>
+            </div>
+            <div>
+              <span class="label">Overall</span>
+              <span class="value" id="fraudOverall">—</span>
+            </div>
+          </div>
+          <div class="fraud-checks" id="fraudChecks"></div>
+          <div class="fraud-na" id="fraudNotApplicable" hidden>
+            <span class="label">Not applicable</span>
+            <div class="fraud-na-list" id="fraudNotApplicableList"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
         <h2>Verify Identity</h2>
         <div class="row">
           <input id="verifyDocInput" type="file" accept="image/*,.pdf" multiple />

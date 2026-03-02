@@ -276,6 +276,121 @@ pre {
   color: var(--muted);
 }
 
+.fraud-summary {
+  display: grid;
+  gap: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  background: #fdfbf8;
+}
+
+.fraud-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.fraud-meta .label {
+  display: block;
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.fraud-meta .value {
+  font-weight: 600;
+}
+
+.fraud-checks {
+  display: grid;
+  gap: 10px;
+}
+
+.fraud-check {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: #fff;
+  display: grid;
+  gap: 6px;
+}
+
+.fraud-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.fraud-name {
+  font-weight: 600;
+}
+
+.fraud-status {
+  font-size: 0.8rem;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: #f1ede6;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.fraud-status.pass {
+  background: #e6f4ef;
+  border-color: #b7e3d4;
+  color: #1a6d52;
+}
+
+.fraud-status.fail {
+  background: #fdecec;
+  border-color: #f3b7b7;
+  color: #9c2b2b;
+}
+
+.fraud-status.na {
+  background: #fff6dd;
+  border-color: #f1d9a6;
+  color: #8a5a00;
+}
+
+.fraud-details {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.fraud-na {
+  display: grid;
+  gap: 8px;
+}
+
+.fraud-na .label {
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.fraud-na-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.fraud-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: #f1ede6;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
 input[type="file"] {
   border: 1px dashed var(--border);
   padding: 10px;
