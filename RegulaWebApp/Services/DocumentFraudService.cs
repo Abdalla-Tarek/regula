@@ -12,6 +12,10 @@ public class DocumentFraudService : IDocumentFraudService
 {
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IOptions<DocROptions> _optionsAccessor;
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        PropertyNameCaseInsensitive = true
+    };
 
     public DocumentFraudService(
         IHttpClientFactory httpClientFactory,
@@ -37,17 +41,25 @@ public class DocumentFraudService : IDocumentFraudService
         var client = _httpClientFactory.CreateClient("DocR");
 
         using var response = await client.PostAsJsonAsync(options.ProcessEndpoint, payload);
-        var content = await response.Content.ReadAsStringAsync();
-
         if (!response.IsSuccessStatusCode)
         {
+            var content = await response.Content.ReadAsStringAsync();
             return new ObjectResult(new { error = "DocR process request failed.", details = content })
             {
                 StatusCode = (int)response.StatusCode
             };
         }
 
-        var summary = BuildFraudSummary(content);
+        var apiResponse = await response.Content.ReadFromJsonAsync<ProcessResponse>(JsonOptions);
+        if (apiResponse is null)
+        {
+            return new ObjectResult(new { error = "Unable to read DocR response." })
+            {
+                StatusCode = StatusCodes.Status502BadGateway
+            };
+        }
+
+        var summary = BuildFraudSummary(apiResponse);
         return new OkObjectResult(summary)
         {
             StatusCode = (int)response.StatusCode
@@ -167,33 +179,26 @@ public class DocumentFraudService : IDocumentFraudService
         };
     }
 
-    private static FraudSummary BuildFraudSummary(string json)
+    private static FraudSummary BuildFraudSummary(ProcessResponse response)
     {
         try
         {
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            var transactionId = FindFirstString(root, new[]
-            {
-                "transactionId", "transactionID", "id", "TransactionId", "TransactionID"
-            });
-
-            var overallStatus = FindOverallStatus(root);
+            var transactionId = response.TransactionInfo?.TransactionID;
+            var overallStatus = FindOverallStatus(response);
             var checks = new List<FraudCheckResult>();
             var notApplicable = new List<string>();
 
-            AddCheck(checks, notApplicable, EvaluateDocumentType(root));
-            AddCheck(checks, notApplicable, EvaluateImageQuality(root));
-            AddCheck(checks, notApplicable, EvaluateDocumentLiveness(root));
-            AddCheck(checks, notApplicable, EvaluateHologramOvi(root));
-            AddCheck(checks, notApplicable, EvaluateMrz(root));
-            AddCheck(checks, notApplicable, EvaluateVisualOcr(root));
-            AddCheck(checks, notApplicable, EvaluatePhotoEmbedding(root));
-            AddCheck(checks, notApplicable, EvaluateSecurityPattern(root));
-            AddCheck(checks, notApplicable, EvaluateExtendedMrzOcr(root));
-            AddCheck(checks, notApplicable, EvaluateGeometry(root));
-            AddCheck(checks, notApplicable, EvaluateDataCrossValidation(root));
+            AddCheck(checks, notApplicable, EvaluateDocumentType(response));
+            AddCheck(checks, notApplicable, EvaluateImageQuality(response));
+            AddCheck(checks, notApplicable, EvaluateDocumentLiveness(response));
+            AddCheck(checks, notApplicable, EvaluateHologramOvi(response));
+            AddCheck(checks, notApplicable, EvaluateMrz(response));
+            AddCheck(checks, notApplicable, EvaluateVisualOcr(response));
+            AddCheck(checks, notApplicable, EvaluatePhotoEmbedding(response));
+            AddCheck(checks, notApplicable, EvaluateSecurityPattern(response));
+            AddCheck(checks, notApplicable, EvaluateExtendedMrzOcr(response));
+            AddCheck(checks, notApplicable, EvaluateGeometry(response));
+            AddCheck(checks, notApplicable, EvaluateDataCrossValidation(response));
 
             return new FraudSummary
             {
@@ -231,59 +236,79 @@ public class DocumentFraudService : IDocumentFraudService
         }
     }
 
-    private static FraudCheckResult EvaluateDocumentType(JsonElement root)
+    private static FraudCheckResult EvaluateDocumentType(ProcessResponse response)
     {
-        var node = FindFirstObjectByNameIgnoreCase(root, "OneCandidate");
-        if (!node.HasValue)
+        var candidate = GetContainers(response)
+            .Select(item => item.OneCandidate)
+            .FirstOrDefault(item => item is not null);
+
+        if (candidate is not null)
         {
-            return NotApplicable("Document Type Identification", "No OneCandidate section in response.");
+            var name = candidate.DocumentName;
+            var fdsCount = candidate.FDSIDList?.Count;
+            var icao = candidate.FDSIDList?.ICAOCode;
+
+            var hasTemplate = !string.IsNullOrWhiteSpace(name) || (fdsCount.HasValue && fdsCount.Value > 0);
+            var status = hasTemplate ? "pass" : "fail";
+            var details = hasTemplate
+                ? $"Matched template: {name ?? "unknown"} (ICAO {icao ?? "n/a"})."
+                : "No document template match in the response.";
+
+            return new FraudCheckResult
+            {
+                Name = "Document Type Identification",
+                Status = status,
+                Details = details,
+                EvidencePaths = new List<string> { "ContainerList.List[].OneCandidate" }
+            };
         }
 
-        var name = ReadString(node.Value, "DocumentName");
-        var fdsList = ReadInt(node.Value, "FDSIDList", "Count");
-        var icao = ReadString(node.Value, "FDSIDList", "ICAOCode");
+        var docType = GetContainers(response)
+            .SelectMany(item => item.DocType ?? new List<DocumentType>())
+            .FirstOrDefault();
 
-        var hasTemplate = !string.IsNullOrWhiteSpace(name) || (fdsList.HasValue && fdsList.Value > 0);
-        var status = hasTemplate ? "pass" : "fail";
-        var details = hasTemplate
-            ? $"Matched template: {name ?? "unknown"} (ICAO {icao ?? "n/a"})."
-            : "No document template match in the response.";
-
-        return new FraudCheckResult
+        if (docType is not null)
         {
-            Name = "Document Type Identification",
-            Status = status,
-            Details = details,
-            EvidencePaths = new List<string> { "ContainerList.List[].OneCandidate" }
-        };
+            var details = $"Matched template: {docType.Name ?? "unknown"} (ICAO {docType.ICAOCode ?? "n/a"}).";
+            return new FraudCheckResult
+            {
+                Name = "Document Type Identification",
+                Status = "pass",
+                Details = details,
+                EvidencePaths = new List<string> { "ContainerList.List[].DocType" }
+            };
+        }
+
+        return NotApplicable("Document Type Identification", "No OneCandidate or DocType section in response.");
     }
 
-    private static FraudCheckResult EvaluateImageQuality(JsonElement root)
+    private static FraudCheckResult EvaluateImageQuality(ProcessResponse response)
     {
-        var node = FindFirstObjectByNameIgnoreCase(root, "ImageQualityCheckList");
-        if (!node.HasValue)
+        var qualityList = GetContainers(response)
+            .Select(item => item.ImageQualityCheckList)
+            .FirstOrDefault(item => item?.List.Count > 0);
+
+        if (qualityList is null)
         {
             return NotApplicable("Image Quality Assessment", "No ImageQualityCheckList section in response.");
         }
 
         var failed = new List<string>();
         var passed = 0;
-        if (TryGetPropertyIgnoreCase(node.Value, "List", out var list) && list.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in list.EnumerateArray())
-            {
-                var result = ReadInt(item, "result");
-                var type = ReadInt(item, "type");
-                var probability = ReadInt(item, "probability");
 
-                if (result.HasValue && result.Value == 0)
-                {
-                    failed.Add($"type={type?.ToString() ?? "?"}, probability={probability?.ToString() ?? "?"}");
-                }
-                else if (result.HasValue && result.Value == 1)
-                {
-                    passed++;
-                }
+        foreach (var item in qualityList.List)
+        {
+            var result = item.Result;
+            var type = item.Type;
+            var probability = item.Probability;
+
+            if (result.HasValue && result.Value == 0)
+            {
+                failed.Add($"type={type?.ToString() ?? "?"}, probability={probability?.ToString() ?? "?"}");
+            }
+            else if (result.HasValue && result.Value == 1)
+            {
+                passed++;
             }
         }
 
@@ -308,15 +333,12 @@ public class DocumentFraudService : IDocumentFraudService
             EvidencePaths = new List<string> { "ContainerList.List[].ImageQualityCheckList" }
         };
     }
-    private static FraudCheckResult EvaluateDocumentLiveness(JsonElement root)
+    private static FraudCheckResult EvaluateDocumentLiveness(ProcessResponse response)
     {
-        var statusNode = FindFirstObjectByNameIgnoreCase(root, "Status");
-        if (!statusNode.HasValue)
-        {
-            return NotApplicable("Document Liveness Check", "No Status section in response.");
-        }
+        var integrity = GetContainers(response)
+            .Select(item => item.Status?.CaptureProcessIntegrity)
+            .FirstOrDefault(value => value.HasValue);
 
-        var integrity = ReadInt(statusNode.Value, "captureProcessIntegrity");
         if (!integrity.HasValue)
         {
             return NotApplicable("Document Liveness Check", "captureProcessIntegrity not provided.");
@@ -339,28 +361,16 @@ public class DocumentFraudService : IDocumentFraudService
         };
     }
 
-    private static FraudCheckResult EvaluateHologramOvi(JsonElement root)
+    private static FraudCheckResult EvaluateHologramOvi(ProcessResponse response)
     {
-        var node = FindFirstObjectByNameIgnoreCase(root, "AuthenticityCheckList");
-        if (!node.HasValue)
-        {
-            return NotApplicable("Hologram / OVI / MLI / Dynaprint Check", "No AuthenticityCheckList section in response.");
-        }
-
-        var elements = ExtractAuthenticityElements(node.Value);
+        var elements = ExtractAuthenticityElements(response);
         if (elements.Count == 0)
         {
-            return new FraudCheckResult
-            {
-                Name = "Hologram / OVI / MLI / Dynaprint Check",
-                Status = "unknown",
-                Details = "Authenticity check list present but no elements found.",
-                EvidencePaths = new List<string> { "ContainerList.List[].AuthenticityCheckList" }
-            };
+            return NotApplicable("Hologram / OVI / MLI / Dynaprint Check", "No Authenticity elements in response.");
         }
 
-        var failed = elements.Where(e => e.ElementResult == 0).ToList();
-        var passed = elements.Where(e => e.ElementResult == 1).ToList();
+        var failed = elements.Where(e => e.Result == 0).ToList();
+        var passed = elements.Where(e => e.Result == 1).ToList();
 
         if (failed.Count > 0)
         {
@@ -369,7 +379,7 @@ public class DocumentFraudService : IDocumentFraudService
                 Name = "Hologram / OVI / MLI / Dynaprint Check",
                 Status = "fail",
                 Details = $"Authenticity elements failed: {string.Join("; ", failed.Take(3).Select(FormatAuthenticityElement))}.",
-                EvidencePaths = new List<string> { "ContainerList.List[].AuthenticityCheckList.List[].List[]" }
+                EvidencePaths = new List<string> { "ContainerList.List[].AuthenticityCheckList/Authenticity.CheckList" }
             };
         }
 
@@ -380,21 +390,24 @@ public class DocumentFraudService : IDocumentFraudService
             Details = passed.Count > 0
                 ? $"Authenticity elements passed ({passed.Count})."
                 : "Authenticity elements present but status could not be determined.",
-            EvidencePaths = new List<string> { "ContainerList.List[].AuthenticityCheckList.List[].List[]" }
+            EvidencePaths = new List<string> { "ContainerList.List[].AuthenticityCheckList/Authenticity.CheckList" }
         };
     }
 
-    private static FraudCheckResult EvaluateMrz(JsonElement root)
+    private static FraudCheckResult EvaluateMrz(ProcessResponse response)
     {
-        var mrzQuality = FindFirstObjectByNameIgnoreCase(root, "MRZTestQuality");
-        var mrzText = FindTextField(root, "MRZ Strings");
+        var mrzQuality = GetContainers(response)
+            .Select(item => item.MRZTestQuality)
+            .FirstOrDefault(item => item is not null);
 
-        if (!mrzQuality.HasValue && mrzText is null)
+        var mrzText = FindTextField(response, "MRZ Strings");
+
+        if (mrzQuality is null && mrzText is null)
         {
             return NotApplicable("MRZ (Machine Readable Zone) Check", "No MRZTestQuality or MRZ Strings data.");
         }
 
-        var checksum = mrzQuality.HasValue ? ReadInt(mrzQuality.Value, "CHECK_SUMS") : null;
+        var checksum = mrzQuality?.CheckSums;
         var mrzValid = mrzText?.ValidityStatus;
 
         var failedReasons = new List<string>();
@@ -427,28 +440,20 @@ public class DocumentFraudService : IDocumentFraudService
         };
     }
 
-    private static FraudCheckResult EvaluateVisualOcr(JsonElement root)
+    private static FraudCheckResult EvaluateVisualOcr(ProcessResponse response)
     {
-        var textNode = FindFirstObjectByNameIgnoreCase(root, "Text");
-        if (!textNode.HasValue)
-        {
-            return NotApplicable("Visual Zone OCR Validation", "No Text section in response.");
-        }
-
-        if (!TryGetPropertyIgnoreCase(textNode.Value, "fieldList", out var fields) || fields.ValueKind != JsonValueKind.Array)
-        {
-            return NotApplicable("Visual Zone OCR Validation", "No fieldList in Text section.");
-        }
-
         var visualFields = new List<(string name, int? validity)>();
-        foreach (var field in fields.EnumerateArray())
+        foreach (var text in GetContainers(response).Select(item => item.Text).Where(item => item is not null))
         {
-            var name = ReadString(field, "fieldName") ?? "Field";
-            var validity = ReadInt(field, "validityStatus");
-            var hasVisual = FieldHasSource(field, "VISUAL");
-            if (hasVisual)
+            foreach (var field in text!.FieldList)
             {
-                visualFields.Add((name, validity));
+                var name = field.FieldName ?? "Field";
+                var validity = field.ValidityStatus ?? field.Status;
+                var hasVisual = FieldHasVisualSource(field);
+                if (hasVisual)
+                {
+                    visualFields.Add((name, validity));
+                }
             }
         }
 
@@ -479,18 +484,19 @@ public class DocumentFraudService : IDocumentFraudService
         };
     }
 
-    private static FraudCheckResult EvaluatePhotoEmbedding(JsonElement root)
+    private static FraudCheckResult EvaluatePhotoEmbedding(ProcessResponse response)
     {
-        var images = FindFirstObjectByNameIgnoreCase(root, "Images");
-        var graphics = FindFirstObjectByNameIgnoreCase(root, "DocGraphicsInfo");
+        var hasImages = GetContainers(response).Any(item => item.Images?.FieldList.Count > 0);
+        var hasGraphics = GetContainers(response).Any(item => item.DocGraphicsInfo?.PArrayFields.Count > 0);
 
-        if (!images.HasValue && !graphics.HasValue)
+        if (!hasImages && !hasGraphics)
         {
             return NotApplicable("Photo Embedding Check", "No Images or DocGraphicsInfo sections in response.");
         }
 
-        var hasPortrait = HasImageField(images, "Portrait") || HasGraphicsField(graphics, "Portrait");
-        var hasGhost = HasImageField(images, "Ghost portrait");
+        var hasPortrait = GetContainers(response).Any(item => HasImageField(item.Images, "Portrait")) ||
+                          GetContainers(response).Any(item => HasGraphicsField(item.DocGraphicsInfo, "Portrait"));
+        var hasGhost = GetContainers(response).Any(item => HasImageField(item.Images, "Ghost portrait"));
 
         var status = hasPortrait ? "pass" : "fail";
         var details = hasPortrait
@@ -506,15 +512,12 @@ public class DocumentFraudService : IDocumentFraudService
         };
     }
 
-    private static FraudCheckResult EvaluateSecurityPattern(JsonElement root)
+    private static FraudCheckResult EvaluateSecurityPattern(ProcessResponse response)
     {
-        var statusNode = FindFirstObjectByNameIgnoreCase(root, "Status");
-        if (!statusNode.HasValue)
-        {
-            return NotApplicable("Security Pattern / Image Pattern Check", "No Status section in response.");
-        }
+        var security = GetContainers(response)
+            .Select(item => item.Status?.DetailsOptical?.Security)
+            .FirstOrDefault(value => value.HasValue);
 
-        var security = ReadInt(statusNode.Value, "detailsOptical", "security");
         if (!security.HasValue)
         {
             return NotApplicable("Security Pattern / Image Pattern Check", "No security status in detailsOptical.");
@@ -536,28 +539,25 @@ public class DocumentFraudService : IDocumentFraudService
         };
     }
     
-    private static FraudCheckResult EvaluateExtendedMrzOcr(JsonElement root)
+    private static FraudCheckResult EvaluateExtendedMrzOcr(ProcessResponse response)
     {
-        var textNode = FindFirstObjectByNameIgnoreCase(root, "Text");
-        if (!textNode.HasValue)
+        var textNode = GetContainers(response)
+            .Select(item => item.Text)
+            .FirstOrDefault(item => item is not null && item.FieldList.Count > 0);
+
+        if (textNode is null)
         {
             return NotApplicable("Extended MRZ & Extended OCR", "No Text section in response.");
         }
 
-        var comparisonStatus = ReadInt(textNode.Value, "comparisonStatus");
-        if (!TryGetPropertyIgnoreCase(textNode.Value, "fieldList", out var fields) || fields.ValueKind != JsonValueKind.Array)
-        {
-            return NotApplicable("Extended MRZ & Extended OCR", "No fieldList in Text section.");
-        }
-
+        var comparisonStatus = textNode.ComparisonStatus;
         var mismatches = new List<string>();
-        foreach (var field in fields.EnumerateArray())
+        foreach (var field in textNode.FieldList)
         {
-            var status = ReadInt(field, "comparisonStatus");
+            var status = field.ComparisonStatus;
             if (status.HasValue && status.Value != 1)
             {
-                var name = ReadString(field, "fieldName") ?? "Field";
-                mismatches.Add(name);
+                mismatches.Add(field.FieldName ?? "Field");
             }
         }
 
@@ -585,17 +585,20 @@ public class DocumentFraudService : IDocumentFraudService
         };
     }
 
-    private static FraudCheckResult EvaluateGeometry(JsonElement root)
+    private static FraudCheckResult EvaluateGeometry(ProcessResponse response)
     {
-        var node = FindFirstObjectByNameIgnoreCase(root, "DocumentPosition");
-        if (!node.HasValue)
+        var position = GetContainers(response)
+            .Select(item => item.DocumentPosition)
+            .FirstOrDefault(item => item is not null);
+
+        if (position is null)
         {
             return NotApplicable("Geometry Check", "No DocumentPosition section in response.");
         }
 
-        var resultStatus = ReadInt(node.Value, "ResultStatus");
-        var angle = ReadInt(node.Value, "Angle");
-        var perspective = ReadInt(node.Value, "PerspectiveTr");
+        var resultStatus = position.ResultStatus;
+        var angle = position.Angle;
+        var perspective = position.PerspectiveTr;
 
         var status = resultStatus switch
         {
@@ -613,28 +616,25 @@ public class DocumentFraudService : IDocumentFraudService
         };
     }
 
-    private static FraudCheckResult EvaluateDataCrossValidation(JsonElement root)
+    private static FraudCheckResult EvaluateDataCrossValidation(ProcessResponse response)
     {
-        var textNode = FindFirstObjectByNameIgnoreCase(root, "Text");
-        if (!textNode.HasValue)
+        var textNode = GetContainers(response)
+            .Select(item => item.Text)
+            .FirstOrDefault(item => item is not null && item.FieldList.Count > 0);
+
+        if (textNode is null)
         {
             return NotApplicable("Data Cross-Validation", "No Text section in response.");
         }
 
-        var comparisonStatus = ReadInt(textNode.Value, "comparisonStatus");
-        if (!TryGetPropertyIgnoreCase(textNode.Value, "fieldList", out var fields) || fields.ValueKind != JsonValueKind.Array)
-        {
-            return NotApplicable("Data Cross-Validation", "No fieldList in Text section.");
-        }
-
+        var comparisonStatus = textNode.ComparisonStatus;
         var mismatches = new List<string>();
-        foreach (var field in fields.EnumerateArray())
+        foreach (var field in textNode.FieldList)
         {
-            var status = ReadInt(field, "comparisonStatus");
+            var status = field.ComparisonStatus;
             if (status.HasValue && status.Value != 1)
             {
-                var name = ReadString(field, "fieldName") ?? "Field";
-                mismatches.Add(name);
+                mismatches.Add(field.FieldName ?? "Field");
             }
         }
 
@@ -672,294 +672,116 @@ public class DocumentFraudService : IDocumentFraudService
         };
     }
 
-    private static string? FindOverallStatus(JsonElement root)
+    private static string? FindOverallStatus(ProcessResponse response)
     {
-        var statusNode = FindFirstObjectByNameIgnoreCase(root, "Status");
-        if (!statusNode.HasValue)
-        {
-            return FindFirstString(root, new[] { "status", "overallStatus", "result", "ResultStatus" });
-        }
+        var overall = GetContainers(response)
+            .Select(item => item.Status?.OverallStatus)
+            .FirstOrDefault(value => value.HasValue);
 
-        var overall = ReadInt(statusNode.Value, "overallStatus");
-        if (overall.HasValue)
-        {
-            return overall.Value.ToString();
-        }
-
-        return FindFirstString(root, new[] { "status", "overallStatus", "result", "ResultStatus" });
+        return overall?.ToString();
     }
 
-    private static bool FieldHasSource(JsonElement field, string source)
+    private static bool FieldHasVisualSource(TextField field)
     {
-        if (!TryGetPropertyIgnoreCase(field, "valueList", out var valueList) || valueList.ValueKind != JsonValueKind.Array)
-        {
-            return false;
-        }
-
-        foreach (var item in valueList.EnumerateArray())
-        {
-            var itemSource = ReadString(item, "source");
-            if (string.Equals(itemSource, source, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return field.ValueList.Any(value => value.SourceType == SourceType.Visual);
     }
 
-    private static bool HasImageField(JsonElement? imagesNode, string fieldName)
+    private static bool HasImageField(ImagesResult? images, string fieldName)
     {
-        if (!imagesNode.HasValue)
+        if (images is null)
         {
             return false;
         }
 
-        if (!TryGetPropertyIgnoreCase(imagesNode.Value, "fieldList", out var fields) || fields.ValueKind != JsonValueKind.Array)
-        {
-            return false;
-        }
-
-        foreach (var field in fields.EnumerateArray())
-        {
-            var name = ReadString(field, "fieldName");
-            if (string.Equals(name, fieldName, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return images.FieldList.Any(field =>
+            string.Equals(field.FieldName, fieldName, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static bool HasGraphicsField(JsonElement? graphicsNode, string fieldName)
+    private static bool HasGraphicsField(DocGraphicsInfo? graphics, string fieldName)
     {
-        if (!graphicsNode.HasValue)
+        if (graphics is null)
         {
             return false;
         }
 
-        if (!TryGetPropertyIgnoreCase(graphicsNode.Value, "pArrayFields", out var fields) || fields.ValueKind != JsonValueKind.Array)
-        {
-            return false;
-        }
-
-        foreach (var field in fields.EnumerateArray())
-        {
-            var name = ReadString(field, "FieldName");
-            if (string.Equals(name, fieldName, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return graphics.PArrayFields.Any(field =>
+            string.Equals(field.FieldName, fieldName, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static TextFieldInfo? FindTextField(JsonElement root, string fieldName)
+    private static TextField? FindTextField(ProcessResponse response, string fieldName)
     {
-        var textNode = FindFirstObjectByNameIgnoreCase(root, "Text");
-        if (!textNode.HasValue)
+        foreach (var text in GetContainers(response).Select(item => item.Text).Where(item => item is not null))
         {
-            return null;
-        }
-
-        if (!TryGetPropertyIgnoreCase(textNode.Value, "fieldList", out var fields) || fields.ValueKind != JsonValueKind.Array)
-        {
-            return null;
-        }
-
-        foreach (var field in fields.EnumerateArray())
-        {
-            var name = ReadString(field, "fieldName");
-            if (!string.Equals(name, fieldName, StringComparison.OrdinalIgnoreCase))
+            var field = text!.FieldList.FirstOrDefault(item =>
+                string.Equals(item.FieldName, fieldName, StringComparison.OrdinalIgnoreCase));
+            if (field is not null)
             {
-                continue;
+                return field;
             }
-
-            var validity = ReadInt(field, "validityStatus");
-            return new TextFieldInfo(name ?? fieldName, validity);
         }
 
         return null;
     }
 
-    private static List<AuthenticityElement> ExtractAuthenticityElements(JsonElement node)
+    private static List<AuthenticityElementInfo> ExtractAuthenticityElements(ProcessResponse response)
     {
-        var results = new List<AuthenticityElement>();
-        if (!TryGetPropertyIgnoreCase(node, "List", out var groups) || groups.ValueKind != JsonValueKind.Array)
-        {
-            return results;
-        }
+        var results = new List<AuthenticityElementInfo>();
 
-        foreach (var group in groups.EnumerateArray())
+        foreach (var item in GetContainers(response))
         {
-            if (!TryGetPropertyIgnoreCase(group, "List", out var elements) || elements.ValueKind != JsonValueKind.Array)
+            var authList = item.AuthenticityCheckList?.List ?? new List<AuthenticityCheckGroup>();
+            foreach (var group in authList)
             {
-                continue;
+                foreach (var element in group.List)
+                {
+                    results.Add(new AuthenticityElementInfo(
+                        element.Type,
+                        element.ElementType,
+                        element.ElementDiagnose,
+                        element.ElementResult));
+                }
             }
 
-            foreach (var element in elements.EnumerateArray())
+            var auth = item.Authenticity;
+            if (auth is not null)
             {
-                var type = ReadInt(element, "Type");
-                var elementType = ReadInt(element, "ElementType");
-                var diagnose = ReadInt(element, "ElementDiagnose");
-                var result = ReadInt(element, "ElementResult");
-                results.Add(new AuthenticityElement(type, elementType, diagnose, result));
+                foreach (var check in auth.CheckList)
+                {
+                    foreach (var element in check.ElementList)
+                    {
+                        var result = element.ElementResult;
+                        if (!result.HasValue)
+                        {
+                            result = element.Status switch
+                            {
+                                CheckResult.OK => 1,
+                                CheckResult.Failed => 0,
+                                _ => null
+                            };
+                        }
+
+                        results.Add(new AuthenticityElementInfo(
+                            check.Type,
+                            element.ElementType,
+                            element.ElementDiagnose,
+                            result));
+                    }
+                }
             }
         }
 
         return results;
     }
 
-    private static string FormatAuthenticityElement(AuthenticityElement element)
+    private static string FormatAuthenticityElement(AuthenticityElementInfo element)
     {
-        return $"Type={element.Type?.ToString() ?? "?"}, Element={element.ElementType?.ToString() ?? "?"}, Diagnose={element.Diagnose?.ToString() ?? "?"}, Result={element.ElementResult?.ToString() ?? "?"}";
+        return $"Type={element.Type?.ToString() ?? "?"}, Element={element.ElementType?.ToString() ?? "?"}, Diagnose={element.Diagnose?.ToString() ?? "?"}, Result={element.Result?.ToString() ?? "?"}";
     }
 
-    private static bool TryGetPropertyIgnoreCase(JsonElement element, string propertyName, out JsonElement value)
+    private static IEnumerable<ContainerListItem> GetContainers(ProcessResponse response)
     {
-        value = default;
-        if (element.ValueKind != JsonValueKind.Object)
-        {
-            return false;
-        }
-
-        foreach (var prop in element.EnumerateObject())
-        {
-            if (string.Equals(prop.Name, propertyName, StringComparison.OrdinalIgnoreCase))
-            {
-                value = prop.Value;
-                return true;
-            }
-        }
-
-        return false;
+        return response.ContainerList?.List ?? Enumerable.Empty<ContainerListItem>();
     }
 
-    private static JsonElement? FindFirstObjectByNameIgnoreCase(JsonElement element, string name)
-    {
-        if (element.ValueKind == JsonValueKind.Object)
-        {
-            foreach (var prop in element.EnumerateObject())
-            {
-                if (string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase) &&
-                    prop.Value.ValueKind == JsonValueKind.Object)
-                {
-                    return prop.Value;
-                }
-
-                var nested = FindFirstObjectByNameIgnoreCase(prop.Value, name);
-                if (nested.HasValue)
-                {
-                    return nested;
-                }
-            }
-        }
-        else if (element.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in element.EnumerateArray())
-            {
-                var nested = FindFirstObjectByNameIgnoreCase(item, name);
-                if (nested.HasValue)
-                {
-                    return nested;
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private static string? FindFirstString(JsonElement element, IEnumerable<string> propertyNames)
-    {
-        if (element.ValueKind == JsonValueKind.Object)
-        {
-            foreach (var prop in element.EnumerateObject())
-            {
-                if (propertyNames.Any(name => prop.NameEquals(name)) && prop.Value.ValueKind == JsonValueKind.String)
-                {
-                    return prop.Value.GetString();
-                }
-
-                var nested = FindFirstString(prop.Value, propertyNames);
-                if (!string.IsNullOrWhiteSpace(nested))
-                {
-                    return nested;
-                }
-            }
-        }
-        else if (element.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in element.EnumerateArray())
-            {
-                var nested = FindFirstString(item, propertyNames);
-                if (!string.IsNullOrWhiteSpace(nested))
-                {
-                    return nested;
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private static string? ReadString(JsonElement element, params string[] path)
-    {
-        var current = element;
-        foreach (var segment in path)
-        {
-            if (!TryGetPropertyOrIndex(current, segment, out var next))
-            {
-                return null;
-            }
-            current = next;
-        }
-
-        return current.ValueKind == JsonValueKind.String ? current.GetString() : null;
-    }
-
-    private static int? ReadInt(JsonElement element, params string[] path)
-    {
-        var current = element;
-        foreach (var segment in path)
-        {
-            if (!TryGetPropertyOrIndex(current, segment, out var next))
-            {
-                return null;
-            }
-            current = next;
-        }
-
-        if (current.ValueKind == JsonValueKind.Number && current.TryGetInt32(out var number))
-        {
-            return number;
-        }
-
-        return null;
-    }
-
-    private static bool TryGetPropertyOrIndex(JsonElement element, string segment, out JsonElement value)
-    {
-        value = default;
-        if (element.ValueKind == JsonValueKind.Object)
-        {
-            return TryGetPropertyIgnoreCase(element, segment, out value);
-        }
-
-        if (element.ValueKind == JsonValueKind.Array && int.TryParse(segment, out var index))
-        {
-            var arr = element.EnumerateArray().ToList();
-            if (index >= 0 && index < arr.Count)
-            {
-                value = arr[index];
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private sealed record TextFieldInfo(string Name, int? ValidityStatus);
-    private sealed record AuthenticityElement(int? Type, int? ElementType, int? Diagnose, int? ElementResult);
+    private sealed record AuthenticityElementInfo(int? Type, int? ElementType, int? Diagnose, int? Result);
 }

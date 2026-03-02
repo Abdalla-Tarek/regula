@@ -13,6 +13,10 @@ public class DocumentProcessingService : IDocumentProcessingService
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IOptions<DocROptions> _optionsAccessor;
     private readonly IRegulaService _regulaService;
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        PropertyNameCaseInsensitive = true
+    };
 
     public DocumentProcessingService(
         IHttpClientFactory httpClientFactory,
@@ -66,17 +70,25 @@ public class DocumentProcessingService : IDocumentProcessingService
         var client = _httpClientFactory.CreateClient("DocR");
 
         using var response = await client.PostAsJsonAsync(options.ProcessEndpoint, payload);
-        var content = await response.Content.ReadAsStringAsync();
-
         if (!response.IsSuccessStatusCode)
         {
+            var content = await response.Content.ReadAsStringAsync();
             return new ObjectResult(new { error = "DocR process request failed.", details = content })
             {
                 StatusCode = (int)response.StatusCode
             };
         }
 
-        var documentPortrait = ExtractDocumentPortraitBase64(content);
+        var apiResponse = await response.Content.ReadFromJsonAsync<ProcessResponse>(JsonOptions);
+        if (apiResponse is null)
+        {
+            return new ObjectResult(new { error = "Unable to read DocR response." })
+            {
+                StatusCode = StatusCodes.Status502BadGateway
+            };
+        }
+
+        var documentPortrait = ExtractDocumentPortraitBase64(apiResponse);
         if (string.IsNullOrWhiteSpace(documentPortrait))
         {
             return new ObjectResult(new { error = "Unable to extract document portrait from DocR response." })
@@ -233,17 +245,25 @@ public class DocumentProcessingService : IDocumentProcessingService
         var client = _httpClientFactory.CreateClient("DocR");
 
         using var response = await client.PostAsJsonAsync(options.ProcessEndpoint, payload);
-        var content = await response.Content.ReadAsStringAsync();
-
         if (!response.IsSuccessStatusCode)
         {
+            var content = await response.Content.ReadAsStringAsync();
             return new ObjectResult(new { error = "DocR process request failed.", details = content })
             {
                 StatusCode = (int)response.StatusCode
             };
         }
 
-        var summary = BuildDocRSummary(content);
+        var apiResponse = await response.Content.ReadFromJsonAsync<ProcessResponse>(JsonOptions);
+        if (apiResponse is null)
+        {
+            return new ObjectResult(new { error = "Unable to read DocR response." })
+            {
+                StatusCode = StatusCodes.Status502BadGateway
+            };
+        }
+
+        var summary = BuildDocRSummary(apiResponse);
         return new JsonResult(summary)
         {
             StatusCode = (int)response.StatusCode
@@ -311,32 +331,51 @@ public class DocumentProcessingService : IDocumentProcessingService
         return value;
     }
 
-    private static object BuildDocRSummary(string json)
+    private static object BuildDocRSummary(ProcessResponse response)
     {
         try
         {
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
+            var transactionId = response.TransactionInfo?.TransactionID;
 
-            var transactionId = FindFirstString(root, new[] { "transactionId", "transactionID", "id", "TransactionId", "TransactionID" });
+            var visualFields = ExtractDocVisualFields(response);
+            var textFields = ExtractTextFieldValues(response);
 
-            var fields = ExtractDocVisualFields(root);
-            var surname = GetFieldValue(fields, "Surname", "Last Name", "Family Name");
-            var givenNames = GetFieldValue(fields, "Given Names", "Given Name", "First Name");
+            var surname = FirstNonEmpty(
+                GetFieldValue(visualFields, "Surname", "Last Name", "Family Name"),
+                GetFieldValue(textFields, "Surname", "Last Name", "Family Name"));
+
+            var givenNames = FirstNonEmpty(
+                GetFieldValue(visualFields, "Given Names", "Given Name", "First Name"),
+                GetFieldValue(textFields, "Given Names", "Given Name", "First Name"));
+
             var fullName = !string.IsNullOrWhiteSpace(surname) && !string.IsNullOrWhiteSpace(givenNames)
                 ? $"{surname} {givenNames}".Trim()
-                : GetFieldValue(fields, "Name", "Full Name");
-            var documentNumber = GetFieldValue(fields, "Document Number", "Document No.", "Doc Number", "DocumentNo", "Document ID");
-            var documentType = GetFieldValue(fields, "Document Class Code", "Document Type", "Document Type Code", "Document Class");
-            var dateOfBirth = GetFieldValue(fields, "Date of Birth", "Birth Date", "DOB");
-            var expiryDate = GetFieldValue(fields, "Date of Expiry", "Date of Expiration", "Expiry Date", "Expiration Date");
+                : FirstNonEmpty(
+                    GetFieldValue(visualFields, "Name", "Full Name"),
+                    GetFieldValue(textFields, "Name", "Full Name"));
 
-            var validity = ExtractValiditySummary(root);
+            var documentNumber = FirstNonEmpty(
+                GetFieldValue(visualFields, "Document Number", "Document No.", "Doc Number", "DocumentNo", "Document ID"),
+                GetFieldValue(textFields, "Document Number", "Document No.", "Doc Number", "DocumentNo", "Document ID"));
+
+            var documentType = FirstNonEmpty(
+                GetFieldValue(visualFields, "Document Class Code", "Document Type", "Document Type Code", "Document Class"),
+                GetFieldValue(textFields, "Document Class Code", "Document Type", "Document Type Code", "Document Class"));
+
+            var dateOfBirth = FirstNonEmpty(
+                GetFieldValue(visualFields, "Date of Birth", "Birth Date", "DOB"),
+                GetFieldValue(textFields, "Date of Birth", "Birth Date", "DOB"));
+
+            var expiryDate = FirstNonEmpty(
+                GetFieldValue(visualFields, "Date of Expiry", "Date of Expiration", "Expiry Date", "Expiration Date"),
+                GetFieldValue(textFields, "Date of Expiry", "Date of Expiration", "Expiry Date", "Expiration Date"));
+
+            var validity = ExtractValiditySummary(response);
             var overallStatus = validity.valid.Count > 0 || validity.invalid.Count > 0
                 ? (validity.invalid.Count == 0 ? "valid" : "invalid")
-                : FindFirstString(root, new[] { "status", "overallStatus", "result", "ResultStatus" });
+                : FindOverallStatus(response);
 
-            var documentPosition = ExtractDocumentPosition(root);
+            var documentPosition = ExtractDocumentPosition(response);
 
             return new DocRSummary
             {
@@ -361,122 +400,339 @@ public class DocumentProcessingService : IDocumentProcessingService
         }
     }
 
-    private static (List<string> valid, List<string> invalid) ExtractValiditySummary(JsonElement root)
+    private static (List<string> valid, List<string> invalid) ExtractValiditySummary(ProcessResponse response)
     {
         var valid = new List<string>();
         var invalid = new List<string>();
-        CollectAuthenticityValidity(root, valid, invalid);
+
+        foreach (var item in GetContainers(response))
+        {
+            var auth = item.Authenticity;
+            if (auth is null)
+            {
+                continue;
+            }
+
+            foreach (var check in auth.CheckList)
+            {
+                var label = BuildAuthenticityLabel(check);
+                if (string.IsNullOrWhiteSpace(label))
+                {
+                    continue;
+                }
+
+                var status = check.Status;
+                if (status == CheckResult.OK)
+                {
+                    valid.Add(label);
+                    continue;
+                }
+
+                if (status == CheckResult.Failed)
+                {
+                    invalid.Add(label);
+                    continue;
+                }
+
+                if (check.ElementList.Any(element => IsAuthenticityElementFailed(element)))
+                {
+                    invalid.Add(label);
+                }
+                else if (check.ElementList.Any(element => IsAuthenticityElementPassed(element)))
+                {
+                    valid.Add(label);
+                }
+            }
+        }
+
         return (
             valid: valid.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
             invalid: invalid.Distinct(StringComparer.OrdinalIgnoreCase).ToList()
         );
     }
 
-    private static void CollectAuthenticityValidity(JsonElement element, List<string> valid, List<string> invalid)
+    private static bool IsAuthenticityElementFailed(AuthenticityElement element)
     {
-        if (!TryGetContainerList(element, out var containerList))
+        if (element.ElementResult.HasValue)
         {
-            return;
+            return element.ElementResult.Value == 0;
         }
 
-        foreach (var item in containerList.EnumerateArray())
-        {
-            if (!item.TryGetProperty("AuthenticityCheckList", out var authList) ||
-                authList.ValueKind != JsonValueKind.Object ||
-                !authList.TryGetProperty("List", out var list) ||
-                list.ValueKind != JsonValueKind.Array)
-            {
-                continue;
-            }
-
-            foreach (var group in list.EnumerateArray())
-            {
-                if (!group.TryGetProperty("List", out var checks) || checks.ValueKind != JsonValueKind.Array)
-                {
-                    continue;
-                }
-
-                foreach (var check in checks.EnumerateArray())
-                {
-                    var label = BuildAuthenticityLabel(check);
-                    var isValid = ReadFirstBool(check, "ElementResult", "Result", "ElementDiagnose");
-                    if (isValid is null || string.IsNullOrWhiteSpace(label))
-                    {
-                        continue;
-                    }
-
-                    if (isValid.Value)
-                    {
-                        valid.Add(label);
-                    }
-                    else
-                    {
-                        invalid.Add(label);
-                    }
-                }
-            }
-        }
+        return element.Status == CheckResult.Failed || element.ElementDiagnose == 0;
     }
 
-    private static bool TryGetContainerList(JsonElement root, out JsonElement list)
+    private static bool IsAuthenticityElementPassed(AuthenticityElement element)
     {
-        list = default;
-        if (root.ValueKind == JsonValueKind.Object &&
-            root.TryGetProperty("ContainerList", out var container) &&
-            container.ValueKind == JsonValueKind.Object &&
-            container.TryGetProperty("List", out list) &&
-            list.ValueKind == JsonValueKind.Array)
+        if (element.ElementResult.HasValue)
         {
-            return true;
+            return element.ElementResult.Value == 1;
         }
 
-        return false;
+        return element.Status == CheckResult.OK || element.ElementDiagnose == 1;
     }
 
-    private static Dictionary<string, string> ExtractDocVisualFields(JsonElement root)
+    private static Dictionary<string, string> ExtractDocVisualFields(ProcessResponse response)
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (!TryGetContainerList(root, out var list))
+        foreach (var item in GetContainers(response))
         {
-            return result;
-        }
-
-        foreach (var item in list.EnumerateArray())
-        {
-            if (!item.TryGetProperty("DocVisualExtendedInfo", out var docInfo) ||
-                docInfo.ValueKind != JsonValueKind.Object ||
-                !docInfo.TryGetProperty("pArrayFields", out var fields) ||
-                fields.ValueKind != JsonValueKind.Array)
+            var fields = item.DocVisualExtendedInfo?.PArrayFields;
+            if (fields is null)
             {
                 continue;
             }
 
-            foreach (var field in fields.EnumerateArray())
+            foreach (var field in fields)
             {
-                if (!field.TryGetProperty("FieldName", out var nameElement) ||
-                    nameElement.ValueKind != JsonValueKind.String)
+                var name = field.FieldName?.Trim();
+                var value = field.BufText?.Trim();
+                if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(value))
                 {
-                    continue;
-                }
-
-                var name = nameElement.GetString();
-                if (string.IsNullOrWhiteSpace(name))
-                {
-                    continue;
-                }
-
-                var value = field.TryGetProperty("Buf_Text", out var textElement) && textElement.ValueKind == JsonValueKind.String
-                    ? textElement.GetString()
-                    : null;
-
-                if (!string.IsNullOrWhiteSpace(value))
-                {
-                    result[name] = value.Trim();
+                    result[name] = value;
                 }
             }
         }
 
         return result;
+    }
+
+    private static Dictionary<string, string> ExtractTextFieldValues(ProcessResponse response)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in GetContainers(response))
+        {
+            var fields = item.Text?.FieldList;
+            if (fields is null)
+            {
+                continue;
+            }
+
+            foreach (var field in fields)
+            {
+                var name = field.FieldName?.Trim();
+                var value = field.Value?.Trim();
+                if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(value))
+                {
+                    result[name] = value;
+                }
+            }
+        }
+
+        return result;
+    }
+
+    private static string? FindOverallStatus(ProcessResponse response)
+    {
+        foreach (var item in GetContainers(response))
+        {
+            var status = item.Status?.OverallStatus;
+            if (status.HasValue)
+            {
+                return status.Value.ToString();
+            }
+        }
+
+        return null;
+    }
+
+    private static DocumentPositionInfo? ExtractDocumentPosition(ProcessResponse response)
+    {
+        foreach (var item in GetContainers(response))
+        {
+            if (item.DocumentPosition is null)
+            {
+                continue;
+            }
+
+            var raw = item.DocumentPosition;
+            var region = BuildRegionFromCorners(raw.LeftTop, raw.RightTop, raw.RightBottom, raw.LeftBottom);
+            var info = new DocumentPositionInfo
+            {
+                Raw = raw,
+                Region = region
+            };
+
+            info = info with
+            {
+                Interpretation = BuildInterpretation(info),
+                Verdict = BuildVerdict(info),
+                UserMessage = BuildUserMessage(info)
+            };
+
+            return info;
+        }
+
+        return null;
+    }
+
+    private static string? ExtractDocumentPortraitBase64(ProcessResponse response)
+    {
+        var candidates = new List<string>();
+
+        foreach (var item in GetContainers(response))
+        {
+            var imageFields = item.Images?.FieldList ?? new List<ImageField>();
+            foreach (var field in imageFields)
+            {
+                if (!string.Equals(field.FieldName?.Trim(), "Portrait", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                foreach (var value in field.ValueList)
+                {
+                    if (IsProbablyBase64(value.Value))
+                    {
+                        candidates.Add(value.Value);
+                    }
+                }
+            }
+
+            var docGraphics = item.DocGraphicsInfo?.PArrayFields ?? new List<DocGraphicField>();
+            foreach (var field in docGraphics)
+            {
+                if (!string.Equals(field.FieldName?.Trim(), "Portrait", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var imageBase64 = ReadImageString(field.Image);
+                if (IsProbablyBase64(imageBase64))
+                {
+                    candidates.Add(imageBase64!);
+                }
+            }
+        }
+
+        if (candidates.Count == 0)
+        {
+            foreach (var item in GetContainers(response))
+            {
+                var imageFields = item.Images?.FieldList ?? new List<ImageField>();
+                foreach (var field in imageFields)
+                {
+                    foreach (var value in field.ValueList)
+                    {
+                        if (IsProbablyBase64(value.Value))
+                        {
+                            candidates.Add(value.Value);
+                        }
+                    }
+                }
+            }
+        }
+
+        return candidates
+            .OrderByDescending(value => value?.Length ?? 0)
+            .FirstOrDefault();
+    }
+
+    private static string? ReadImageString(JsonElement? value)
+    {
+        if (!value.HasValue)
+        {
+            return null;
+        }
+
+        if (value.Value.ValueKind == JsonValueKind.String)
+        {
+            return value.Value.GetString();
+        }
+
+        return null;
+    }
+
+    private static IdentityDocumentInfo ExtractDocumentInfo(ProcessResponse response)
+    {
+        try
+        {
+            var visualFields = ExtractDocVisualFields(response);
+            var textFields = ExtractTextFieldValues(response);
+
+            var surname = FirstNonEmpty(
+                GetFieldValue(visualFields, "Surname", "Last Name", "Family Name"),
+                GetFieldValue(textFields, "Surname", "Last Name", "Family Name"));
+
+            var name = FirstNonEmpty(
+                GetFieldValue(visualFields, "Given Names", "Given Name", "First Name", "Name", "Full Name", "Surname And Given Names"),
+                GetFieldValue(textFields, "Given Names", "Given Name", "First Name", "Name", "Full Name", "Surname And Given Names"));
+
+            var documentNumber = FirstNonEmpty(
+                GetFieldValue(visualFields, "Document Number", "Document No.", "Doc Number", "Passport Number", "Passport No.", "ID Number", "Identity Number", "Identity Card Number"),
+                GetFieldValue(textFields, "Document Number", "Document No.", "Doc Number", "Passport Number", "Passport No.", "ID Number", "Identity Number", "Identity Card Number"));
+
+            var dateOfBirth = FirstNonEmpty(
+                GetFieldValue(visualFields, "Date of Birth", "Birth Date", "DOB"),
+                GetFieldValue(textFields, "Date of Birth", "Birth Date", "DOB"));
+
+            var gender = FirstNonEmpty(
+                GetFieldValue(visualFields, "Sex", "Gender"),
+                GetFieldValue(textFields, "Sex", "Gender"));
+
+            var mrzText = ExtractMrzRawText(response);
+            var portrait = ExtractDocumentPortraitBase64(response);
+
+            return new IdentityDocumentInfo
+            {
+                Name = name,
+                Surname = surname,
+                DocumentNumber = documentNumber,
+                DateOfBirth = dateOfBirth,
+                Gender = gender,
+                MrzText = mrzText,
+                PortraitImageBase64 = CleanBase64(portrait ?? string.Empty),
+                RawResponseJson = null
+            };
+        }
+        catch
+        {
+            return new IdentityDocumentInfo();
+        }
+    }
+
+    private static string? ExtractMrzRawText(ProcessResponse response)
+    {
+        foreach (var item in GetContainers(response))
+        {
+            var mrzText = item.MrzOCR?.MrzText;
+            if (!string.IsNullOrWhiteSpace(mrzText))
+            {
+                return mrzText;
+            }
+        }
+
+        foreach (var item in GetContainers(response))
+        {
+            var field = item.Text?.FieldList
+                ?.FirstOrDefault(f => string.Equals(f.FieldName, "MRZ Strings", StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(field?.Value))
+            {
+                return field.Value;
+            }
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<ContainerListItem> GetContainers(ProcessResponse response)
+    {
+        return response.ContainerList?.List ?? Enumerable.Empty<ContainerListItem>();
+    }
+
+    private static string BuildAuthenticityLabel(AuthenticityCheck check)
+    {
+        var parts = new List<string>();
+        if (check.Type != 0)
+        {
+            parts.Add($"Type {check.Type}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(check.TypicalName))
+        {
+            parts.Add(check.TypicalName.Trim());
+        }
+
+        return parts.Count == 0 ? "AuthenticityCheck" : $"AuthenticityCheck ({string.Join(", ", parts)})";
     }
 
     private static string? GetFieldValue(Dictionary<string, string> fields, params string[] names)
@@ -492,59 +748,6 @@ public class DocumentProcessingService : IDocumentProcessingService
         return null;
     }
 
-    private static DocumentPositionInfo? ExtractDocumentPosition(JsonElement root)
-    {
-        var node = FindFirstObjectByName(root, "DocumentPosition");
-        if (!node.HasValue)
-        {
-            node = FindFirstObjectByNameIgnoreCase(root, "DocumentPosition");
-        }
-
-        if (!node.HasValue)
-        {
-            return null;
-        }
-
-        var raw = ParseDocumentPositionRaw(node.Value);
-        var region = BuildRegionFromCorners(raw?.LeftTop, raw?.RightTop, raw?.RightBottom, raw?.LeftBottom);
-        var info = new DocumentPositionInfo
-        {
-            Raw = raw,
-            Region = region
-        };
-
-        info = info with
-        {
-            Interpretation = BuildInterpretation(info),
-            Verdict = BuildVerdict(info),
-            UserMessage = BuildUserMessage(info)
-        };
-
-        return info;
-    }
-
-    private static DocumentPositionRaw ParseDocumentPositionRaw(JsonElement element)
-    {
-        return new DocumentPositionRaw
-        {
-            Angle = ReadDouble(element, "Angle"),
-            Center = ReadPoint(element, "Center"),
-            Dpi = ReadInt(element, "Dpi"),
-            Height = ReadInt(element, "Height"),
-            Width = ReadInt(element, "Width"),
-            Inverse = ReadInt(element, "Inverse"),
-            ObjArea = ReadDouble(element, "ObjArea"),
-            ObjIntAngleDev = ReadDouble(element, "ObjIntAngleDev"),
-            PerspectiveTr = ReadInt(element, "PerspectiveTr"),
-            ResultStatus = ReadInt(element, "ResultStatus"),
-            DocFormat = ReadInt(element, "docFormat"),
-            LeftTop = ReadPoint(element, "LeftTop"),
-            RightTop = ReadPoint(element, "RightTop"),
-            RightBottom = ReadPoint(element, "RightBottom"),
-            LeftBottom = ReadPoint(element, "LeftBottom")
-        };
-    }
-
     private async Task<(IdentityDocumentInfo? info, int? statusCode, string? error, string? details)> ProcessDocumentImageAsync(string base64)
     {
         var request = new DocumentProcessRequest
@@ -553,31 +756,36 @@ public class DocumentProcessingService : IDocumentProcessingService
         };
 
         var payload = BuildProcessPayload(request);
-        var response = await SendToDocRRawAsync(payload);
+        var response = await SendToDocRModelAsync(payload);
 
         if (!string.IsNullOrWhiteSpace(response.error))
         {
             return (null, response.statusCode, response.error, response.details);
         }
 
-        var info = ExtractDocumentInfo(response.json ?? string.Empty);
+        if (response.model is null)
+        {
+            return (null, response.statusCode, "Unable to read DocR response.", null);
+        }
+
+        var info = ExtractDocumentInfo(response.model);
         return (info, response.statusCode, null, null);
     }
 
-    private async Task<(string? json, int? statusCode, string? error, string? details)> SendToDocRRawAsync(object payload)
+    private async Task<(ProcessResponse? model, int? statusCode, string? error, string? details)> SendToDocRModelAsync(object payload)
     {
         var options = _optionsAccessor.Value;
         var client = _httpClientFactory.CreateClient("DocR");
 
         using var response = await client.PostAsJsonAsync(options.ProcessEndpoint, payload);
-        var content = await response.Content.ReadAsStringAsync();
-
         if (!response.IsSuccessStatusCode)
         {
+            var content = await response.Content.ReadAsStringAsync();
             return (null, (int)response.StatusCode, "DocR process request failed.", content);
         }
 
-        return (content, (int)response.StatusCode, null, null);
+        var model = await response.Content.ReadFromJsonAsync<ProcessResponse>(JsonOptions);
+        return (model, (int)response.StatusCode, null, null);
     }
 
     private static DocumentRegion? BuildRegionFromCorners(
@@ -914,279 +1122,6 @@ public class DocumentProcessingService : IDocumentProcessingService
         };
     }
 
-    private static DocumentPoint? ReadPoint(JsonElement element, string propertyName)
-    {
-        if (!TryGetPropertyIgnoreCase(element, propertyName, out var pointElement) ||
-            pointElement.ValueKind != JsonValueKind.Object)
-        {
-            return null;
-        }
-
-        var x = ReadDouble(pointElement, "x");
-        var y = ReadDouble(pointElement, "y");
-
-        if (!x.HasValue && !y.HasValue)
-        {
-            return null;
-        }
-
-        return new DocumentPoint { X = x, Y = y };
-    }
-
-    private static double? ReadDouble(JsonElement element, string propertyName)
-    {
-        if (!TryGetPropertyIgnoreCase(element, propertyName, out var value))
-        {
-            return null;
-        }
-
-        if (value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var number))
-        {
-            return number;
-        }
-
-        if (value.ValueKind == JsonValueKind.String && double.TryParse(value.GetString(), out var parsed))
-        {
-            return parsed;
-        }
-
-        return null;
-    }
-
-    private static int? ReadInt(JsonElement element, string propertyName)
-    {
-        if (!TryGetPropertyIgnoreCase(element, propertyName, out var value))
-        {
-            return null;
-        }
-
-        if (value.ValueKind == JsonValueKind.Number)
-        {
-            if (value.TryGetInt32(out var number))
-            {
-                return number;
-            }
-
-            if (value.TryGetDouble(out var doubleValue))
-            {
-                return (int)Math.Round(doubleValue);
-            }
-        }
-
-        if (value.ValueKind == JsonValueKind.String && int.TryParse(value.GetString(), out var parsed))
-        {
-            return parsed;
-        }
-
-        return null;
-    }
-
-    private static bool TryGetPropertyIgnoreCase(JsonElement element, string propertyName, out JsonElement value)
-    {
-        value = default;
-        if (element.ValueKind != JsonValueKind.Object)
-        {
-            return false;
-        }
-
-        foreach (var prop in element.EnumerateObject())
-        {
-            if (string.Equals(prop.Name, propertyName, StringComparison.OrdinalIgnoreCase))
-            {
-                value = prop.Value;
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static JsonElement? FindFirstObjectByNameIgnoreCase(JsonElement element, string name)
-    {
-        if (element.ValueKind == JsonValueKind.Object)
-        {
-            foreach (var prop in element.EnumerateObject())
-            {
-                if (string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase) &&
-                    prop.Value.ValueKind == JsonValueKind.Object)
-                {
-                    return prop.Value;
-                }
-
-                var nested = FindFirstObjectByNameIgnoreCase(prop.Value, name);
-                if (nested.HasValue)
-                {
-                    return nested;
-                }
-            }
-        }
-        else if (element.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in element.EnumerateArray())
-            {
-                var nested = FindFirstObjectByNameIgnoreCase(item, name);
-                if (nested.HasValue)
-                {
-                    return nested;
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private static bool? ReadFirstBool(JsonElement element, params string[] names)
-    {
-        foreach (var name in names)
-        {
-            if (element.TryGetProperty(name, out var value))
-            {
-                if (value.ValueKind == JsonValueKind.True || value.ValueKind == JsonValueKind.False)
-                {
-                    return value.GetBoolean();
-                }
-
-                if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var num))
-                {
-                    return num != 0;
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private static string BuildAuthenticityLabel(JsonElement element)
-    {
-        var type = ReadFirstInt(element, "Type");
-        var elementType = ReadFirstInt(element, "ElementType");
-        var diagnose = ReadFirstInt(element, "ElementDiagnose");
-        var parts = new List<string>();
-
-        if (type.HasValue)
-        {
-            parts.Add($"Type {type.Value}");
-        }
-
-        if (elementType.HasValue)
-        {
-            parts.Add($"Element {elementType.Value}");
-        }
-
-        if (diagnose.HasValue)
-        {
-            parts.Add($"Diagnose {diagnose.Value}");
-        }
-
-        return parts.Count == 0 ? "AuthenticityCheck" : $"AuthenticityCheck ({string.Join(", ", parts)})";
-    }
-
-    private static int? ReadFirstInt(JsonElement element, params string[] names)
-    {
-        foreach (var name in names)
-        {
-            if (element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number))
-            {
-                return number;
-            }
-        }
-
-        return null;
-    }
-
-    private static double? ExtractSimilarityPercent(string json)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-            var faceApiNode = FindFirstObjectByName(root, "faceApi") ?? FindFirstObjectByName(root, "FaceApi");
-            if (!faceApiNode.HasValue)
-            {
-                return null;
-            }
-
-            var value = TryExtractSimilarityValue(faceApiNode.Value);
-            if (!value.HasValue &&
-                faceApiNode.Value.ValueKind == JsonValueKind.Object &&
-                faceApiNode.Value.TryGetProperty("response", out var response) &&
-                response.ValueKind == JsonValueKind.String)
-            {
-                value = TryExtractSimilarityFromJsonString(response.GetString());
-            }
-
-            return NormalizeSimilarityPercent(value);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static JsonElement? FindFirstObjectByName(JsonElement element, string name)
-    {
-        if (element.ValueKind == JsonValueKind.Object)
-        {
-            foreach (var prop in element.EnumerateObject())
-            {
-                if (prop.NameEquals(name) && prop.Value.ValueKind == JsonValueKind.Object)
-                {
-                    return prop.Value;
-                }
-
-                var nested = FindFirstObjectByName(prop.Value, name);
-                if (nested.HasValue)
-                {
-                    return nested;
-                }
-            }
-        }
-        else if (element.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in element.EnumerateArray())
-            {
-                var nested = FindFirstObjectByName(item, name);
-                if (nested.HasValue)
-                {
-                    return nested;
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private static double? TryExtractSimilarityValue(JsonElement element)
-    {
-        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "similarity",
-            "score",
-            "matchScore",
-            "match_score"
-        };
-
-        return FindFirstNumber(element, keys);
-    }
-
-    private static double? TryExtractSimilarityFromJsonString(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json))
-        {
-            return null;
-        }
-
-        try
-        {
-            using var doc = JsonDocument.Parse(json);
-            return TryExtractSimilarityValue(doc.RootElement);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
     private static double? NormalizeSimilarityPercent(double? value)
     {
         if (!value.HasValue)
@@ -1206,72 +1141,6 @@ public class DocumentProcessingService : IDocumentProcessingService
         }
 
         return number;
-    }
-
-    private static double? FindFirstNumber(JsonElement element, HashSet<string> propertyNames)
-    {
-        if (element.ValueKind == JsonValueKind.Object)
-        {
-            foreach (var prop in element.EnumerateObject())
-            {
-                if (propertyNames.Contains(prop.Name) && prop.Value.TryGetDouble(out var value))
-                {
-                    return value;
-                }
-
-                var nested = FindFirstNumber(prop.Value, propertyNames);
-                if (nested.HasValue)
-                {
-                    return nested;
-                }
-            }
-        }
-        else if (element.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in element.EnumerateArray())
-            {
-                var nested = FindFirstNumber(item, propertyNames);
-                if (nested.HasValue)
-                {
-                    return nested;
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private static string? FindFirstString(JsonElement element, IEnumerable<string> propertyNames)
-    {
-        if (element.ValueKind == JsonValueKind.Object)
-        {
-            foreach (var prop in element.EnumerateObject())
-            {
-                if (propertyNames.Any(name => prop.NameEquals(name)) && prop.Value.ValueKind == JsonValueKind.String)
-                {
-                    return prop.Value.GetString();
-                }
-
-                var nested = FindFirstString(prop.Value, propertyNames);
-                if (!string.IsNullOrWhiteSpace(nested))
-                {
-                    return nested;
-                }
-            }
-        }
-        else if (element.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in element.EnumerateArray())
-            {
-                var nested = FindFirstString(item, propertyNames);
-                if (!string.IsNullOrWhiteSpace(nested))
-                {
-                    return nested;
-                }
-            }
-        }
-
-        return null;
     }
 
     private static string? GetFormat(IFormFile file)
@@ -1306,297 +1175,6 @@ public class DocumentProcessingService : IDocumentProcessingService
         };
     }
 
-    private static string? ExtractDocumentPortraitBase64(string json)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-            var best = FindBestImageBase64(root);
-            if (!string.IsNullOrWhiteSpace(best))
-            {
-                return best;
-            }
-
-            var preferredKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                "portrait",
-                "portraitimage",
-                "portraitimagedata",
-                "portraitimagebase64",
-                "faceimage",
-                "face",
-                "image",
-                "imagedata",
-                "imagebase64"
-            };
-
-            var byKey = FindFirstBase64ByKeys(root, preferredKeys);
-            if (!string.IsNullOrWhiteSpace(byKey))
-            {
-                return byKey;
-            }
-
-            return FindFirstBase64String(root);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static string? FindBestImageBase64(JsonElement root)
-    {
-        var candidates = new List<(string value, string path)>();
-        CollectBase64Candidates(root, "root", candidates);
-        CollectPortraitFromDocGraphics(root, candidates);
-        CollectPortraitFromImages(root, candidates);
-        if (candidates.Count == 0)
-        {
-            return null;
-        }
-
-        var best = candidates
-            .Select(item => (item.value, score: ScoreImageCandidate(item.value, item.path)))
-            .OrderByDescending(item => item.score)
-            .FirstOrDefault();
-
-        return best.value;
-    }
-
-    private static void CollectBase64Candidates(JsonElement element, string path, List<(string value, string path)> output)
-    {
-        if (element.ValueKind == JsonValueKind.Object)
-        {
-            foreach (var prop in element.EnumerateObject())
-            {
-                var nextPath = $"{path}.{prop.Name}";
-                if (prop.Value.ValueKind == JsonValueKind.String)
-                {
-                    var value = prop.Value.GetString();
-                    if (IsProbablyBase64(value))
-                    {
-                        output.Add((value ?? string.Empty, nextPath));
-                    }
-                }
-
-                CollectBase64Candidates(prop.Value, nextPath, output);
-            }
-        }
-        else if (element.ValueKind == JsonValueKind.Array)
-        {
-            var index = 0;
-            foreach (var item in element.EnumerateArray())
-            {
-                var nextPath = $"{path}[{index}]";
-                CollectBase64Candidates(item, nextPath, output);
-                index++;
-            }
-        }
-    }
-
-    private static double ScoreImageCandidate(string base64, string path)
-    {
-        var score = 0.0;
-        var lowerPath = path.ToLowerInvariant();
-
-        if (lowerPath.Contains("portrait") || lowerPath.Contains("face"))
-        {
-            score += 50;
-        }
-
-        if (lowerPath.Contains("mrz") || lowerPath.Contains("signature"))
-        {
-            score -= 20;
-        }
-
-        if (lowerPath.Contains("logo") || lowerPath.Contains("emblem") || lowerPath.Contains("flag"))
-        {
-            score -= 30;
-        }
-
-        score += Math.Min(base64.Length / 1000.0, 50);
-        return score;
-    }
-
-    private static void CollectPortraitFromDocGraphics(JsonElement root, List<(string value, string path)> output)
-    {
-        var node = FindFirstObjectByNameIgnoreCase(root, "DocGraphicsInfo");
-        if (!node.HasValue)
-        {
-            return;
-        }
-
-        if (!TryGetPropertyIgnoreCase(node.Value, "pArrayFields", out var fields) ||
-            fields.ValueKind != JsonValueKind.Array)
-        {
-            return;
-        }
-
-        var index = 0;
-        foreach (var field in fields.EnumerateArray())
-        {
-            var name = ReadString(field, "FieldName");
-            var imageBase64 = ReadString(field, "image", "image");
-            if (!string.IsNullOrWhiteSpace(name) &&
-                !string.IsNullOrWhiteSpace(imageBase64) &&
-                string.Equals(name.Trim(), "Portrait", StringComparison.OrdinalIgnoreCase))
-            {
-                output.Add((imageBase64, $"DocGraphicsInfo.pArrayFields[{index}].Portrait"));
-            }
-
-            index++;
-        }
-    }
-
-    private static void CollectPortraitFromImages(JsonElement root, List<(string value, string path)> output)
-    {
-        var node = FindFirstObjectByNameIgnoreCase(root, "Images");
-        if (!node.HasValue)
-        {
-            return;
-        }
-
-        if (!TryGetPropertyIgnoreCase(node.Value, "fieldList", out var fieldList) ||
-            fieldList.ValueKind != JsonValueKind.Array)
-        {
-            return;
-        }
-
-        var index = 0;
-        foreach (var field in fieldList.EnumerateArray())
-        {
-            var name = ReadString(field, "fieldName");
-            if (string.IsNullOrWhiteSpace(name) ||
-                !string.Equals(name.Trim(), "Portrait", StringComparison.OrdinalIgnoreCase))
-            {
-                index++;
-                continue;
-            }
-
-            if (!TryGetPropertyIgnoreCase(field, "valueList", out var valueList) ||
-                valueList.ValueKind != JsonValueKind.Array)
-            {
-                index++;
-                continue;
-            }
-
-            var valueIndex = 0;
-            foreach (var item in valueList.EnumerateArray())
-            {
-                var value = ReadString(item, "value");
-                if (IsProbablyBase64(value))
-                {
-                    output.Add((value ?? string.Empty, $"Images.fieldList[{index}].valueList[{valueIndex}].Portrait"));
-                }
-                valueIndex++;
-            }
-
-            index++;
-        }
-    }
-
-    private static IdentityDocumentInfo ExtractDocumentInfo(string json)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            var fields = ExtractDocVisualFields(root);
-            var textFields = ExtractTextFieldValues(root);
-
-            var surname = FirstNonEmpty(
-                GetFieldValue(fields, "Surname", "Last Name", "Family Name"),
-                GetFieldValue(textFields, "Surname", "Last Name", "Family Name"));
-
-            var name = FirstNonEmpty(
-                GetFieldValue(fields, "Given Names", "Given Name", "First Name", "Name", "Full Name", "Surname And Given Names"),
-                GetFieldValue(textFields, "Given Names", "Given Name", "First Name", "Name", "Full Name", "Surname And Given Names"));
-
-            var documentNumber = FirstNonEmpty(
-                GetFieldValue(fields, "Document Number", "Document No.", "Doc Number", "Passport Number", "Passport No.", "ID Number", "Identity Number", "Identity Card Number"),
-                GetFieldValue(textFields, "Document Number", "Document No.", "Doc Number", "Passport Number", "Passport No.", "ID Number", "Identity Number", "Identity Card Number"));
-
-            var dateOfBirth = FirstNonEmpty(
-                GetFieldValue(fields, "Date of Birth", "Birth Date", "DOB"),
-                GetFieldValue(textFields, "Date of Birth", "Birth Date", "DOB"));
-
-            var gender = FirstNonEmpty(
-                GetFieldValue(fields, "Sex", "Gender"),
-                GetFieldValue(textFields, "Sex", "Gender"));
-            var mrzText = ExtractMrzRawText(root);
-            var portrait = ExtractDocumentPortraitBase64(json);
-
-            return new IdentityDocumentInfo
-            {
-                Name = name,
-                Surname = surname,
-                DocumentNumber = documentNumber,
-                DateOfBirth = dateOfBirth,
-                Gender = gender,
-                MrzText = mrzText,
-                PortraitImageBase64 = CleanBase64(portrait ?? string.Empty),
-                RawResponseJson = json
-            };
-        }
-        catch
-        {
-            return new IdentityDocumentInfo
-            {
-                RawResponseJson = json
-            };
-        }
-    }
-
-    private static Dictionary<string, string> ExtractTextFieldValues(JsonElement root)
-    {
-        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var textNode = FindFirstObjectByNameIgnoreCase(root, "Text");
-        if (!textNode.HasValue)
-        {
-            return result;
-        }
-
-        if (!TryGetPropertyIgnoreCase(textNode.Value, "fieldList", out var fieldList) ||
-            fieldList.ValueKind != JsonValueKind.Array)
-        {
-            return result;
-        }
-
-        foreach (var field in fieldList.EnumerateArray())
-        {
-            var name = ReadString(field, "fieldName");
-            var value = ReadString(field, "value");
-            if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(value))
-            {
-                result[name.Trim()] = value.Trim();
-            }
-        }
-
-        return result;
-    }
-
-    private static string? ReadString(JsonElement element, params string[] path)
-    {
-        var current = element;
-        foreach (var segment in path)
-        {
-            if (!TryGetPropertyIgnoreCase(current, segment, out var next))
-            {
-                return null;
-            }
-            current = next;
-        }
-
-        if (current.ValueKind == JsonValueKind.String)
-        {
-            return current.GetString();
-        }
-
-        return null;
-    }
-
     private static string? FirstNonEmpty(params string?[] values)
     {
         foreach (var value in values)
@@ -1606,41 +1184,6 @@ public class DocumentProcessingService : IDocumentProcessingService
                 return value;
             }
         }
-        return null;
-    }
-
-    private static string? ExtractMrzRawText(JsonElement root)
-    {
-        var direct = FindFirstString(root, new[]
-        {
-            "mrz",
-            "MRZ",
-            "mrzText",
-            "MRZText",
-            "mrzString",
-            "MRZString",
-            "rawMRZ",
-            "rawMrz",
-            "mrzRaw",
-            "MRZRaw",
-            "mrzTextRaw"
-        });
-
-        if (!string.IsNullOrWhiteSpace(direct))
-        {
-            return direct;
-        }
-
-        var mrzNode = FindFirstObjectByNameIgnoreCase(root, "MRZ") ?? FindFirstObjectByNameIgnoreCase(root, "Mrz");
-        if (mrzNode.HasValue)
-        {
-            var candidate = FindFirstString(mrzNode.Value, new[] { "Text", "text", "Raw", "raw", "value", "Value" });
-            if (!string.IsNullOrWhiteSpace(candidate))
-            {
-                return candidate;
-            }
-        }
-
         return null;
     }
 
@@ -1732,80 +1275,6 @@ public class DocumentProcessingService : IDocumentProcessingService
 
         var digits = new string(value.Where(char.IsDigit).ToArray());
         return digits;
-    }
-
-    private static string? FindFirstBase64ByKeys(JsonElement element, HashSet<string> keys)
-    {
-        if (element.ValueKind == JsonValueKind.Object)
-        {
-            foreach (var prop in element.EnumerateObject())
-            {
-                if (keys.Contains(prop.Name) && prop.Value.ValueKind == JsonValueKind.String)
-                {
-                    var value = prop.Value.GetString();
-                    if (IsProbablyBase64(value))
-                    {
-                        return value;
-                    }
-                }
-
-                var nested = FindFirstBase64ByKeys(prop.Value, keys);
-                if (!string.IsNullOrWhiteSpace(nested))
-                {
-                    return nested;
-                }
-            }
-        }
-        else if (element.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in element.EnumerateArray())
-            {
-                var nested = FindFirstBase64ByKeys(item, keys);
-                if (!string.IsNullOrWhiteSpace(nested))
-                {
-                    return nested;
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private static string? FindFirstBase64String(JsonElement element)
-    {
-        if (element.ValueKind == JsonValueKind.Object)
-        {
-            foreach (var prop in element.EnumerateObject())
-            {
-                if (prop.Value.ValueKind == JsonValueKind.String)
-                {
-                    var value = prop.Value.GetString();
-                    if (IsProbablyBase64(value))
-                    {
-                        return value;
-                    }
-                }
-
-                var nested = FindFirstBase64String(prop.Value);
-                if (!string.IsNullOrWhiteSpace(nested))
-                {
-                    return nested;
-                }
-            }
-        }
-        else if (element.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in element.EnumerateArray())
-            {
-                var nested = FindFirstBase64String(item);
-                if (!string.IsNullOrWhiteSpace(nested))
-                {
-                    return nested;
-                }
-            }
-        }
-
-        return null;
     }
 
     private static bool IsProbablyBase64(string? value)
