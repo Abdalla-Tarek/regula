@@ -635,7 +635,8 @@ function renderFraudSummary(data) {
     fraudTransaction.textContent = data?.transactionId ?? data?.TransactionId ?? "—";
   }
   if (fraudOverall) {
-    fraudOverall.textContent = data?.overallStatus ?? data?.OverallStatus ?? "—";
+    const overallValue = data?.overallStatus ?? data?.OverallStatus ?? null;
+    fraudOverall.textContent = formatOverallStatus(overallValue);
   }
 
   fraudChecks.innerHTML = "";
@@ -691,4 +692,31 @@ function formatStatus(status) {
   if (value === "not_applicable" || value === "not applicable" || value === "na") return "N/A";
   if (!value) return "Unknown";
   return value.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function formatOverallStatus(value) {
+  if (value == null || value === "") {
+    return "—";
+  }
+
+  const normalized = String(value).trim();
+  const numeric = Number(normalized);
+  const descriptions = {
+    0: "0 (Fail)",
+    1: "1 (Pass)",
+    2: "2 (Not Completed)",
+    3: "3 (Not Performed)",
+  };
+
+  if (!Number.isNaN(numeric) && Number.isFinite(numeric)) {
+    return descriptions[numeric] ?? `${numeric} (Unknown)`;
+  }
+
+  const lower = normalized.toLowerCase();
+  if (lower === "pass" || lower === "passed") return "Pass";
+  if (lower === "fail" || lower === "failed") return "Fail";
+  if (lower === "not available" || lower === "not_available" || lower === "na") return "N/A";
+  if (lower === "not performed" || lower === "not_performed") return "Not Performed";
+
+  return normalized;
 }
