@@ -1,10 +1,11 @@
-using System.Net.Http.Json;
-using System.Text.Json;
-using System.Linq;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using RegulaWebApp.Models;
+using System.Globalization;
+using System.Linq;
+using System.Net.Http.Json;
+using System.Text.Json;
 
 namespace RegulaWebApp.Services;
 
@@ -677,8 +678,8 @@ public class DocumentProcessingService : IDocumentProcessingService
                 Name = name,
                 Surname = surname,
                 DocumentNumber = documentNumber,
-                DateOfBirth = dateOfBirth,
-                Gender = gender,
+                DateOfBirth = NormalizeDob(dateOfBirth),
+                Gender = NormalizeGender(gender),
                 MrzText = mrzText,
                 PortraitImageBase64 = CleanBase64(portrait ?? string.Empty),
                 RawResponseJson = null
@@ -689,7 +690,34 @@ public class DocumentProcessingService : IDocumentProcessingService
             return new IdentityDocumentInfo();
         }
     }
+    private static string NormalizeDob(string? input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+            return "";
 
+        input = input.Trim();
+
+        string[] formats =
+        {
+            "yyMMdd",        // 250518
+            "yyyyMMdd",      // 20250518
+            "ddMMyyyy",      // 18052025
+            "dd-MM-yyyy",    // 18-05-2025
+            "dd/MM/yyyy",    // 18/05/2025
+            "yyyy-MM-dd",    // 2025-05-18
+            "yyyy/MM/dd"
+        };
+
+        if (DateTime.TryParseExact(input, formats,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.None,
+            out DateTime date))
+        {
+            return date.ToString("dd-MM-yyyy");
+        }
+
+        return ""; // أو رجّع input لو عايز
+    }
     private static string? ExtractMrzRawText(ProcessResponse response)
     {
         foreach (var item in GetContainers(response))
@@ -1244,14 +1272,22 @@ public class DocumentProcessingService : IDocumentProcessingService
 
     private static bool CompareDates(string? left, string? right)
     {
-        var leftNorm = NormalizeDate(left);
-        var rightNorm = NormalizeDate(right);
-        if (string.IsNullOrWhiteSpace(leftNorm) || string.IsNullOrWhiteSpace(rightNorm))
+        var leftCandidates = NormalizeDateCandidates(left);
+        var rightCandidates = NormalizeDateCandidates(right);
+        if (leftCandidates.Count == 0 || rightCandidates.Count == 0)
         {
             return false;
         }
 
-        return leftNorm == rightNorm;
+        foreach (var l in leftCandidates)
+        {
+            if (rightCandidates.Contains(l))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static string NormalizeValue(string? value)
@@ -1266,15 +1302,67 @@ public class DocumentProcessingService : IDocumentProcessingService
         return filtered;
     }
 
-    private static string NormalizeDate(string? value)
+    private static HashSet<string> NormalizeDateCandidates(string? value)
     {
+        var candidates = new HashSet<string>(StringComparer.Ordinal);
         if (string.IsNullOrWhiteSpace(value))
         {
-            return string.Empty;
+            return candidates;
         }
 
         var digits = new string(value.Where(char.IsDigit).ToArray());
-        return digits;
+        if (digits.Length == 0)
+        {
+            return candidates;
+        }
+
+        candidates.Add(digits);
+
+        if (digits.Length >= 6)
+        {
+            candidates.Add(digits[^6..]); // YYMMDD tail
+        }
+
+        if (digits.Length == 8)
+        {
+            var yearFirst = int.TryParse(digits[..4], out var year1) && year1 is >= 1900 and <= 2100;
+            var yearLast = int.TryParse(digits[^4..], out var year2) && year2 is >= 1900 and <= 2100;
+
+            if (yearFirst)
+            {
+                candidates.Add(digits);
+                candidates.Add(digits[2..]); // YYMMDD
+            }
+
+            if (yearLast)
+            {
+                // Assume DDMMYYYY or MMDDYYYY -> keep last 6 for compare
+                candidates.Add(digits[^6..]);
+            }
+        }
+
+        return candidates;
+    }
+
+    private static string? NormalizeGender(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return value;
+        }
+
+        var normalized = value.Trim().ToLowerInvariant();
+        if (normalized is "m" or "male" or "1")
+        {
+            return "M";
+        }
+
+        if (normalized is "f" or "female" or "2")
+        {
+            return "F";
+        }
+
+        return value.Trim().ToUpperInvariant();
     }
 
     private static bool IsProbablyBase64(string? value)
