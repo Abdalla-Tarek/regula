@@ -193,10 +193,30 @@ button.primary {
   background: #fdfbf8;
 }
 
-video {
+.camera-frame {
+  position: relative;
   width: min(100%, 640px);
+}
+
+video {
+  width: 100%;
   border-radius: 12px;
   background: #000;
+}
+
+#passportOverlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 12px;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.camera-frame video {
+  position: relative;
+  z-index: 1;
 }
 
 .instructions {

@@ -69,6 +69,16 @@
           <input id="passportUploadInput" type="file" accept="image/*" />
           <button id="comparePassportsBtn" class="primary">Compare Documents</button>
         </div>
+        <div class="camera passport-camera" id="passportCameraWrap" hidden>
+          <div class="camera-frame">
+            <video id="passportCamera" autoplay playsinline muted></video>
+            <canvas id="passportOverlay" width="640" height="480"></canvas>
+          </div>
+        </div>
+        <div class="instructions">
+          <span class="label">Capture:</span>
+          <span id="passportInstruction">Upload a document to start the camera.</span>
+        </div>
         <div class="row match-row">
           <div class="match-result passport-result">
             <div class="match-card">
@@ -177,6 +187,7 @@
       </section>
     </main>
 
+    <script src="https://docs.opencv.org/4.x/opencv.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

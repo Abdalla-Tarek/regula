@@ -50,9 +50,49 @@ const passportFaceScore = document.getElementById("passportFaceScore");
 const passportNumberMatch = document.getElementById("passportNumberMatch");
 const passportNameMatch = document.getElementById("passportNameMatch");
 const passportDobMatch = document.getElementById("passportDobMatch");
+const passportCameraWrap = document.getElementById("passportCameraWrap");
+const passportCamera = document.getElementById("passportCamera");
+const passportOverlay = document.getElementById("passportOverlay");
+const passportInstruction = document.getElementById("passportInstruction");
 
 let stream = null;
-let capturedPassportBase64 = null;
+let passportStream = null;
+let passportFirstBase64 = null;
+let passportDetectHandle = null;
+let passportStableFrames = 0;
+let passportLastTarget = null;
+let passportCaptureInProgress = false;
+let cvReady = false;
+let passportCaptureCanvas = null;
+let passportCaptureCtx = null;
+let passportLastProcessTime = 0;
+let passportLastDebugTime = 0;
+const passportDebug = true;
+
+function initOpenCvReady() {
+  if (!window.cv) {
+    return false;
+  }
+
+  if (typeof cv.Mat === "function") {
+    cvReady = true;
+    return true;
+  }
+
+  cv.onRuntimeInitialized = () => {
+    cvReady = true;
+  };
+
+  return false;
+}
+
+if (!initOpenCvReady()) {
+  const cvInterval = setInterval(() => {
+    if (initOpenCvReady()) {
+      clearInterval(cvInterval);
+    }
+  }, 200);
+}
 
 const setResult = (data) => {
   resultJson.textContent = JSON.stringify(data, null, 2);
@@ -324,56 +364,29 @@ verifyIdentityBtn.addEventListener("click", async () => {
   );
 });
 
+if (comparePassportsBtn) {
+  comparePassportsBtn.hidden = true;
+  comparePassportsBtn.disabled = true;
+}
+
 if (passportUploadInput) {
   passportUploadInput.addEventListener("change", async () => {
     const file = passportUploadInput.files[0];
     if (!file) {
+      passportFirstBase64 = null;
+      stopPassportCamera();
+      updatePassportInstruction("Upload a document to start the camera.");
       return;
     }
+
     const preview = await fileToDataUrl(file);
     if (passportPreview1) {
       passportPreview1.src = preview;
     }
-  });
-}
 
-if (comparePassportsBtn) {
-  comparePassportsBtn.addEventListener("click", async () => {
-    const file = passportUploadInput?.files?.[0];
-    if (!file) {
-      setResult({ error: "Upload the first document image." });
-      return;
-    }
-
-    if (!capturedPassportBase64) {
-      if (!stream) {
-        setResult({ error: "Start the webcam to capture the second document image." });
-        return;
-      }
-      const frame = captureFrame();
-      if (!frame) {
-        setResult({ error: "Unable to capture the document frame." });
-        return;
-      }
-      capturedPassportBase64 = frame;
-      if (passportPreview2) {
-        passportPreview2.src = base64ToDataUrl(frame);
-      }
-    }
-
-    const firstDocumentImageBase64 = await fileToBase64(file);
-    const secondDocumentImageBase64 = capturedPassportBase64;
-
-    const response = await fetch("/api/documents/compare-documents", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ firstDocumentImageBase64, secondDocumentImageBase64 }),
-    });
-
-    const data = await response.json();
-    setResult(data);
-    setPassportSummary(data);
-    capturedPassportBase64 = null;
+    passportFirstBase64 = await fileToBase64(file);
+    updatePassportInstruction("Starting camera...");
+    await startPassportCamera();
   });
 }
 
@@ -419,6 +432,348 @@ function base64ToDataUrl(base64) {
     return "";
   }
   return `data:image/jpeg;base64,${base64}`;
+}
+
+function updatePassportInstruction(text) {
+  if (passportInstruction) {
+    passportInstruction.textContent = text;
+  }
+}
+
+async function startPassportCamera() {
+  if (!passportCamera || !passportOverlay || passportStream) {
+    return;
+  }
+
+  passportCaptureInProgress = false;
+  passportStableFrames = 0;
+  passportLastTarget = null;
+  updatePassportInstruction("Loading document detector...");
+
+  try {
+    passportStream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: "environment",
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+      },
+      audio: false,
+    });
+    passportCamera.srcObject = passportStream;
+    if (passportCameraWrap) {
+      passportCameraWrap.hidden = false;
+    }
+
+    passportCamera.addEventListener(
+      "loadedmetadata",
+      () => {
+        resizePassportCanvases();
+        startPassportDetectionLoop();
+      },
+      { once: true }
+    );
+  } catch (error) {
+    updatePassportInstruction("Unable to access the camera.");
+    setResult({ error: "Unable to access the camera.", details: String(error) });
+  }
+}
+
+function stopPassportCamera() {
+  if (passportDetectHandle) {
+    cancelAnimationFrame(passportDetectHandle);
+    passportDetectHandle = null;
+  }
+
+  if (passportStream) {
+    passportStream.getTracks().forEach((track) => track.stop());
+    passportStream = null;
+  }
+
+  if (passportCamera) {
+    passportCamera.srcObject = null;
+  }
+
+  if (passportCameraWrap) {
+    passportCameraWrap.hidden = true;
+  }
+
+  if (passportOverlay) {
+    const ctx = passportOverlay.getContext("2d");
+    ctx.clearRect(0, 0, passportOverlay.width, passportOverlay.height);
+  }
+}
+
+function resizePassportCanvases() {
+  const width = passportCamera.videoWidth || 640;
+  const height = passportCamera.videoHeight || 480;
+
+  passportOverlay.width = width;
+  passportOverlay.height = height;
+
+  passportCaptureCanvas = passportCaptureCanvas || document.createElement("canvas");
+  passportCaptureCanvas.width = width;
+  passportCaptureCanvas.height = height;
+  passportCaptureCtx = passportCaptureCanvas.getContext("2d", { willReadFrequently: true });
+}
+
+function startPassportDetectionLoop() {
+  if (!passportCamera || !passportOverlay) {
+    return;
+  }
+
+  const loop = () => {
+    passportDetectHandle = requestAnimationFrame(loop);
+    detectPassportFrame();
+  };
+  loop();
+}
+
+function detectPassportFrame() {
+  if (!passportStream || passportCaptureInProgress) {
+    return;
+  }
+
+  if (!cvReady) {
+    drawPassportGuide();
+    return;
+  }
+
+  const now = performance.now();
+  if (now - passportLastProcessTime < 120) {
+    return;
+  }
+  passportLastProcessTime = now;
+
+  const width = passportOverlay.width;
+  const height = passportOverlay.height;
+  passportCaptureCtx.drawImage(passportCamera, 0, 0, width, height);
+
+  const src = cv.imread(passportCaptureCanvas);
+  const gray = new cv.Mat();
+  const blurred = new cv.Mat();
+  const edges = new cv.Mat();
+  const dilated = new cv.Mat();
+  const contours = new cv.MatVector();
+  const hierarchy = new cv.Mat();
+
+  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+  cv.Canny(blurred, edges, 75, 200);
+  const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+  cv.dilate(edges, dilated, kernel);
+  kernel.delete();
+  cv.findContours(dilated, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+  const frameArea = width * height;
+  let best = null;
+  let bestArea = 0;
+  let bestRect = null;
+  let bestBounds = null;
+
+  if (passportDebug && performance.now() - passportLastDebugTime > 1000) {
+    passportLastDebugTime = performance.now();
+    console.log("[passport] contours:", contours.size(), "area:", frameArea);
+  }
+
+  for (let i = 0; i < contours.size(); i++) {
+    const contour = contours.get(i);
+    const area = cv.contourArea(contour);
+    if (area < frameArea * 0.01) {
+      contour.delete();
+      continue;
+    }
+
+    const peri = cv.arcLength(contour, true);
+    const approx = new cv.Mat();
+    cv.approxPolyDP(contour, approx, 0.02 * peri, true);
+    const isQuad = approx.rows === 4 && cv.isContourConvex(approx);
+    if (area > bestArea) {
+      if (best) {
+        best.delete();
+      }
+      best = approx;
+      bestArea = area;
+      if (!isQuad) {
+        bestRect = cv.minAreaRect(contour);
+        bestBounds = cv.boundingRect(contour);
+      } else {
+        bestRect = null;
+        bestBounds = cv.boundingRect(contour);
+      }
+    } else {
+      approx.delete();
+    }
+    contour.delete();
+  }
+
+  drawPassportOverlay(best, bestRect, bestBounds, bestArea, frameArea);
+
+  if (best) {
+    best.delete();
+  }
+
+  src.delete();
+  gray.delete();
+  blurred.delete();
+  edges.delete();
+  dilated.delete();
+  contours.delete();
+  hierarchy.delete();
+}
+
+function drawPassportOverlay(best, bestRect, bestBounds, bestArea, frameArea) {
+  const ctx = passportOverlay.getContext("2d");
+  ctx.clearRect(0, 0, passportOverlay.width, passportOverlay.height);
+  drawPassportGuide();
+
+  if (!best) {
+    passportStableFrames = 0;
+    passportLastTarget = null;
+    updatePassportInstruction("Align the document inside the frame.");
+    return;
+  }
+
+  let points = [];
+  if (best.rows === 4) {
+    for (let i = 0; i < 4; i++) {
+      const x = best.data32S[i * 2];
+      const y = best.data32S[i * 2 + 1];
+      points.push({ x, y });
+    }
+  } else if (bestRect) {
+    const rectPoints = cv.RotatedRect.points(bestRect);
+    points = rectPoints.map((p) => ({ x: p.x, y: p.y }));
+  } else if (bestBounds) {
+    points = [
+      { x: bestBounds.x, y: bestBounds.y },
+      { x: bestBounds.x + bestBounds.width, y: bestBounds.y },
+      { x: bestBounds.x + bestBounds.width, y: bestBounds.y + bestBounds.height },
+      { x: bestBounds.x, y: bestBounds.y + bestBounds.height },
+    ];
+  } else {
+    drawPassportGuide();
+    passportStableFrames = 0;
+    passportLastTarget = null;
+    updatePassportInstruction("Align the document inside the frame.");
+    return;
+  }
+
+  const center = points.reduce(
+    (acc, p) => ({ x: acc.x + p.x / 4, y: acc.y + p.y / 4 }),
+    { x: 0, y: 0 }
+  );
+
+  const areaRatio = bestArea / frameArea;
+  const bounds = points.reduce(
+    (acc, p) => ({
+      minX: Math.min(acc.minX, p.x),
+      maxX: Math.max(acc.maxX, p.x),
+      minY: Math.min(acc.minY, p.y),
+      maxY: Math.max(acc.maxY, p.y),
+    }),
+    { minX: points[0].x, maxX: points[0].x, minY: points[0].y, maxY: points[0].y }
+  );
+  const rectW = Math.max(1, bounds.maxX - bounds.minX);
+  const rectH = Math.max(1, bounds.maxY - bounds.minY);
+  const aspect = rectW > rectH ? rectW / rectH : rectH / rectW;
+  const aspectOk = aspect >= 1.1 && aspect <= 2.1;
+  const sizeOk = areaRatio > 0.02 && areaRatio < 0.95 && aspectOk;
+
+  if (sizeOk && passportLastTarget) {
+    const dx = center.x - passportLastTarget.x;
+    const dy = center.y - passportLastTarget.y;
+    const dist = Math.hypot(dx, dy);
+    const areaDelta = Math.abs(bestArea - passportLastTarget.area) / passportLastTarget.area;
+    if (dist < 30 && areaDelta < 0.25) {
+      passportStableFrames += 1;
+    } else {
+      passportStableFrames = 0;
+    }
+  } else if (sizeOk) {
+    passportStableFrames = 1;
+  } else {
+    passportStableFrames = 0;
+  }
+
+  passportLastTarget = { x: center.x, y: center.y, area: bestArea };
+
+  const stableTarget = passportStableFrames >= 6 && sizeOk;
+  ctx.strokeStyle = stableTarget ? "#2aa06f" : "#d5a14b";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  points.slice(1).forEach((p) => ctx.lineTo(p.x, p.y));
+  ctx.closePath();
+  ctx.stroke();
+
+  if (!aspectOk) {
+    updatePassportInstruction("Rotate/align the document so it is horizontal.");
+  } else if (!sizeOk) {
+    updatePassportInstruction("Move the document closer and keep it centered.");
+  } else if (stableTarget) {
+    updatePassportInstruction("Hold steady... capturing.");
+    triggerPassportCapture();
+  } else {
+    updatePassportInstruction("Hold steady for auto capture.");
+  }
+}
+
+function drawPassportGuide() {
+  const ctx = passportOverlay.getContext("2d");
+  ctx.clearRect(0, 0, passportOverlay.width, passportOverlay.height);
+
+  const width = passportOverlay.width;
+  const height = passportOverlay.height;
+  if (!width || !height) {
+    return;
+  }
+
+  const guideWidth = width * 0.8;
+  const guideHeight = height * 0.55;
+  const x = (width - guideWidth) / 2;
+  const y = (height - guideHeight) / 2;
+
+  ctx.setLineDash([8, 6]);
+  ctx.strokeStyle = "#c2b6a9";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x, y, guideWidth, guideHeight);
+  ctx.setLineDash([]);
+}
+
+async function triggerPassportCapture() {
+  if (passportCaptureInProgress || !passportFirstBase64) {
+    return;
+  }
+
+  passportCaptureInProgress = true;
+  passportStableFrames = 0;
+
+  const width = passportOverlay.width;
+  const height = passportOverlay.height;
+  passportCaptureCtx.drawImage(passportCamera, 0, 0, width, height);
+  const dataUrl = passportCaptureCanvas.toDataURL("image/jpeg", 0.92);
+  const secondDocumentImageBase64 = dataUrl.split(",")[1];
+
+  if (passportPreview2) {
+    passportPreview2.src = dataUrl;
+  }
+
+  updatePassportInstruction("Captured. Comparing...");
+  stopPassportCamera();
+  await submitPassportCompare(passportFirstBase64, secondDocumentImageBase64);
+}
+
+async function submitPassportCompare(firstDocumentImageBase64, secondDocumentImageBase64) {
+  const response = await fetch("/api/documents/compare-documents", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ firstDocumentImageBase64, secondDocumentImageBase64 }),
+  });
+
+  const data = await response.json();
+  setResult(data);
+  setPassportSummary(data);
+  updatePassportInstruction("Done. Upload another document to compare again.");
 }
 
 function setMatchPreview(src1, src2) {
@@ -776,3 +1131,4 @@ function formatOverallStatus(value) {
 
   return normalized;
 }
+
