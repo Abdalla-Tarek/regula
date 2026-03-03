@@ -73,7 +73,7 @@ public class DocumentFraudService : IDocumentFraudService
         var scenario = string.IsNullOrWhiteSpace(request.Scenario) ? "FullAuth" : request.Scenario;
         var processParam = new DocRProcessParam(
             scenario,
-            forceAuth ? new DocRAuthParams(CheckLiveness: false) : null,
+            forceAuth ? new DocRAuthParams(CheckLiveness: true) : null,
             null,
             null,
             null,
@@ -555,7 +555,7 @@ public class DocumentFraudService : IDocumentFraudService
         foreach (var field in textNode.FieldList)
         {
             var status = field.ComparisonStatus;
-            if (status.HasValue && status.Value != 1)
+            if (field.ComparisonList.Count > 0 && status.HasValue && status.Value != 1)
             {
                 mismatches.Add(field.FieldName ?? "Field");
             }
@@ -600,10 +600,19 @@ public class DocumentFraudService : IDocumentFraudService
         var angle = position.Angle;
         var perspective = position.PerspectiveTr;
 
+        //var status = resultStatus switch
+        //{
+        //    1 => "pass",
+        //    0 => "fail",
+        //    _ => "unknown"
+        //};
+
         var status = resultStatus switch
         {
-            1 => "pass",
-            0 => "fail",
+            1 => "pass",        // document positioned correctly
+            2 => "warning",     // borderline / not ideal framing
+            3 => "fail",       // invalid positioning
+            0 => "not_performed", // analysis not performed
             _ => "unknown"
         };
 
@@ -632,7 +641,7 @@ public class DocumentFraudService : IDocumentFraudService
         foreach (var field in textNode.FieldList)
         {
             var status = field.ComparisonStatus;
-            if (status.HasValue && status.Value != 1)
+            if (field.ComparisonList.Count > 0 && status.HasValue && status.Value != 1)
             {
                 mismatches.Add(field.FieldName ?? "Field");
             }
