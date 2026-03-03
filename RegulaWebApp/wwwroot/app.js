@@ -50,6 +50,7 @@ const passportFaceScore = document.getElementById("passportFaceScore");
 const passportNumberMatch = document.getElementById("passportNumberMatch");
 const passportNameMatch = document.getElementById("passportNameMatch");
 const passportDobMatch = document.getElementById("passportDobMatch");
+const passportMrzMatch = document.getElementById("passportMrzMatch");
 const passportCameraWrap = document.getElementById("passportCameraWrap");
 const passportCamera = document.getElementById("passportCamera");
 const passportOverlay = document.getElementById("passportOverlay");
@@ -921,6 +922,7 @@ function setPassportSummary(data) {
   updateBadge(passportNumberMatch, data?.isDocumentNumberMatch);
   updateBadge(passportNameMatch, data?.isNameMatch);
   updateBadge(passportDobMatch, data?.isDobMatch);
+  updateBadge(passportMrzMatch, data?.isMrzTextMatch);
 
   if (threshold != null && passportFaceScore && score != null) {
     const label = threshold >= 1 ? `${threshold}%` : `${(threshold * 100).toFixed(0)}%`;

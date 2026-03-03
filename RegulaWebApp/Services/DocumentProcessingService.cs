@@ -193,6 +193,7 @@ public class DocumentProcessingService : IDocumentProcessingService
         var isDocumentNumberMatch = CompareNormalized(firstDocument.DocumentNumber, secondDocument.DocumentNumber);
         var isNameMatch = CompareNames(firstDocument, secondDocument);
         var isDobMatch = CompareDates(firstDocument.DateOfBirth, secondDocument.DateOfBirth);
+        var isMrzTextMatch = CompareMrzText(firstDocument.MrzText, secondDocument.MrzText);
 
         var result = new IdentityDocumentComparisonResult
         {
@@ -204,6 +205,7 @@ public class DocumentProcessingService : IDocumentProcessingService
             IsDocumentNumberMatch = isDocumentNumberMatch,
             IsNameMatch = isNameMatch,
             IsDobMatch = isDobMatch,
+            IsMrzTextMatch = isMrzTextMatch,
             FaceMatchThreshold = threshold
         };
 
@@ -1288,6 +1290,23 @@ public class DocumentProcessingService : IDocumentProcessingService
         }
 
         return false;
+    }
+
+    private static bool CompareMrzText(string? left, string? right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+        {
+            return false;
+        }
+
+        return NormalizeMrz(left) == NormalizeMrz(right);
+    }
+
+    private static string NormalizeMrz(string value)
+    {
+        var trimmed = value.Trim().ToUpperInvariant();
+        var filtered = new string(trimmed.Where(char.IsLetterOrDigit).ToArray());
+        return filtered;
     }
 
     private static string NormalizeValue(string? value)

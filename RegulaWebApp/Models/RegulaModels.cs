@@ -42,6 +42,7 @@ public record IdentityDocumentComparisonResult
     public bool IsDocumentNumberMatch { get; init; }
     public bool IsNameMatch { get; init; }
     public bool IsDobMatch { get; init; }
+    public bool IsMrzTextMatch { get; init; }
     public double FaceMatchThreshold { get; init; }
 }
 
